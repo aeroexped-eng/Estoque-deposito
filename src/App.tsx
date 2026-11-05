@@ -129,6 +129,10 @@ export default function App() {
   const [isDockCollapsed, setIsDockCollapsed] = useState<boolean>(false);
   const [sidebarOpenMobile, setSidebarOpenMobile] = useState<boolean>(false);
   const [inspectorOpenMobile, setInspectorOpenMobile] = useState<boolean>(false);
+  const [sidebarCollapsedDesktop, setSidebarCollapsedDesktop] = useState<boolean>(false);
+  const [inspectorCollapsedDesktop, setInspectorCollapsedDesktop] = useState<boolean>(false);
+  const [rackLayoutMode, setRackLayoutMode] = useState<'columns' | 'matrix'>('columns');
+  const [rackTowerFilter, setRackTowerFilter] = useState<string>('ALL');
   const [clockText, setClockText] = useState<string>('');
 
   // Dropdown Menus & Modals
@@ -2122,8 +2126,19 @@ export default function App() {
 
               <button
                 type="button"
-                onClick={() => setSidebarOpenMobile(o => !o)}
-                className="lg:hidden px-2 py-1 rounded-lg bg-black/5 dark:bg-white/10 hover:bg-mac-blue hover:text-white text-xs font-semibold transition flex items-center space-x-1"
+                onClick={() => {
+                  if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+                    setSidebarOpenMobile(o => !o);
+                  } else {
+                    setSidebarCollapsedDesktop(c => !c);
+                  }
+                }}
+                className={`px-2 py-1 rounded-lg text-xs font-semibold transition flex items-center space-x-1.5 ${
+                  sidebarOpenMobile || !sidebarCollapsedDesktop
+                    ? 'bg-black/10 dark:bg-white/15 text-mac-blue font-bold'
+                    : 'bg-black/5 dark:bg-white/10 hover:bg-mac-blue hover:text-white text-slate-600 dark:text-slate-300'
+                }`}
+                title="Alternar Barra Lateral (Filtros e Ruas)"
               >
                 <span>☰</span>
                 <span className="hidden sm:inline">Filtros</span>
@@ -2325,11 +2340,22 @@ export default function App() {
 
               <button
                 type="button"
-                onClick={() => setInspectorOpenMobile(o => !o)}
-                className="lg:hidden px-2 py-1.5 rounded-lg bg-black/5 dark:bg-white/10 hover:bg-mac-blue hover:text-white text-xs font-semibold transition"
-                title="Abrir Inspetor Lateral"
+                onClick={() => {
+                  if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+                    setInspectorOpenMobile(o => !o);
+                  } else {
+                    setInspectorCollapsedDesktop(c => !c);
+                  }
+                }}
+                className={`px-2 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1 ${
+                  inspectorOpenMobile || !inspectorCollapsedDesktop
+                    ? 'bg-black/10 dark:bg-white/15 text-mac-blue font-bold'
+                    : 'bg-black/5 dark:bg-white/10 hover:bg-mac-blue hover:text-white text-slate-600 dark:text-slate-300'
+                }`}
+                title="Alternar Inspetor Lateral de Endereço"
               >
-                ℹ️
+                <span>ℹ️</span>
+                <span className="hidden xl:inline text-[11px] font-semibold">Inspetor</span>
               </button>
             </div>
           </div>
@@ -2710,24 +2736,30 @@ export default function App() {
             )}
             {/* LEFT SIDEBAR */}
             <aside
-              className={`mac-sidebar w-72 max-w-[85vw] shrink-0 flex flex-col justify-between p-3.5 overflow-y-auto select-none transition-all duration-200 z-50 ${
+              className={`mac-sidebar shrink-0 flex flex-col justify-between p-3.5 overflow-y-auto select-none transition-all duration-300 z-50 ${
                 sidebarOpenMobile
-                  ? 'fixed inset-y-0 left-0 shadow-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-r border-black/15 dark:border-white/15'
-                  : 'hidden lg:flex'
+                  ? 'fixed inset-y-0 left-0 w-80 max-w-[85vw] shadow-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-r border-black/15 dark:border-white/15'
+                  : sidebarCollapsedDesktop
+                    ? 'hidden'
+                    : 'hidden lg:flex w-72 sm:w-80'
               }`}
             >
               <div className="space-y-4">
-                <div className="flex items-center justify-between lg:hidden pb-2 border-b border-black/10 dark:border-white/10">
+                <div className="flex items-center justify-between pb-2 border-b border-black/10 dark:border-white/10">
                   <span className="font-display font-bold text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
                     Navegação e Filtros
                   </span>
                   <button
                     type="button"
-                    onClick={() => setSidebarOpenMobile(false)}
-                    className="px-2.5 py-1 rounded-lg bg-black/10 dark:bg-white/10 hover:bg-rose-500 hover:text-white text-xs font-bold transition flex items-center gap-1"
+                    onClick={() => {
+                      setSidebarOpenMobile(false);
+                      setSidebarCollapsedDesktop(true);
+                    }}
+                    className="px-2 py-0.5 rounded-lg bg-black/10 dark:bg-white/10 hover:bg-rose-500 hover:text-white text-xs font-bold transition flex items-center gap-1"
+                    title="Recolher barra lateral"
                   >
                     <span>✕</span>
-                    <span>Fechar</span>
+                    <span className="text-[10px]">Ocultar</span>
                   </button>
                 </div>
 
@@ -2937,7 +2969,7 @@ export default function App() {
             {/* ============================================================== */}
             {/* CENTER WMS MAP CANVAS                                          */}
             {/* ============================================================== */}
-            <section className="flex-1 flex flex-col overflow-hidden bg-white/30 dark:bg-black/10 relative">
+            <section className="flex-1 min-w-0 flex flex-col overflow-hidden bg-white/30 dark:bg-black/10 relative">
               {/* Sub-header Breadcrumb */}
               <div className="px-4 py-2 border-b border-black/10 dark:border-white/10 flex flex-wrap items-center justify-between gap-2 bg-white/40 dark:bg-white/[0.02] shrink-0">
                 <div className="flex items-center space-x-2">
@@ -2964,7 +2996,7 @@ export default function App() {
                 </div>
 
                 {/* Legend */}
-                <div className="flex items-center space-x-3 text-[11px] font-mono">
+                <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-[10px] sm:text-[11px] font-mono">
                   <span className="flex items-center space-x-1">
                     <span className="w-2.5 h-2.5 rounded bg-emerald-500 inline-block" />
                     <span>Ocupado</span>
@@ -3050,7 +3082,7 @@ export default function App() {
                     </button>
                   </div>
                 ) : mapMode === 'cards' ? (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-2.5">
+                  <div className="grid grid-cols-1 min-[420px]:grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-2.5 sm:gap-3">
                     {filteredViewData.slots.map(slot => {
                       const primary = slot.items[0] || null;
                       const isSelected = selectedAddressKey === slot.wms;
@@ -3222,7 +3254,7 @@ export default function App() {
                     })}
                   </div>
                 ) : (
-                  /* VISTA FRONTAL DO PORTA-PALETES VERTICAL (NÍVEIS NO EIXO VERTICAL • TOPO A PISO) */
+                  /* VISTA DO PORTA-PALETES (MÓDULOS DE TORRES VERTICAIS / MATRIZ PANORÂMICA) */
                   (() => {
                     const uniquePositions = Array.from(
                       new Set(filteredViewData.slots.map(s => s.pos))
@@ -3238,257 +3270,532 @@ export default function App() {
                       (_, i) => maxStreetLevel - i
                     );
 
+                    // Sub-faixas de 5 em 5 torres para visualização focada e ágil
+                    const towerSubchunks: Array<{ id: string; label: string; positions: number[] }> = [
+                      { id: 'ALL', label: `Todas as Torres (${uniquePositions.length})`, positions: uniquePositions }
+                    ];
+                    if (uniquePositions.length > 5) {
+                      for (let i = 0; i < uniquePositions.length; i += 5) {
+                        const chunk = uniquePositions.slice(i, i + 5);
+                        const first = chunk[0];
+                        const last = chunk[chunk.length - 1];
+                        towerSubchunks.push({
+                          id: `${first}-${last}`,
+                          label: `Torres ${String(first).padStart(3, '0')}–${String(last).padStart(3, '0')}`,
+                          positions: chunk
+                        });
+                      }
+                    }
+
+                    const activePositions = rackTowerFilter === 'ALL'
+                      ? uniquePositions
+                      : (towerSubchunks.find(c => c.id === rackTowerFilter)?.positions || uniquePositions);
+
+                    const handleCellClick = (wms: string, primary: any) => {
+                      if (interactiveTargetMode === 'pick_empty') {
+                        const activeItem = inspectedSlot.items.find(it => it.id === selectedSkuId) || inspectedSlot.items[0];
+                        if (activeItem) {
+                          handleQuickMoveToEmpty(activeItem, wms);
+                        }
+                        return;
+                      }
+                      if (interactiveTargetMode === 'pick_swap') {
+                        const activeItem = inspectedSlot.items.find(it => it.id === selectedSkuId) || inspectedSlot.items[0];
+                        if (activeItem) {
+                          handleSwapSlots(activeItem, wms);
+                        }
+                        return;
+                      }
+                      if (transbordoSelectMode) {
+                        handleToggleTransbordoSlotSelection(wms);
+                      } else {
+                        setSelectedAddressKey(wms);
+                        if (primary) setSelectedSkuId(primary.id);
+                        if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+                          setInspectorOpenMobile(true);
+                        }
+                      }
+                    };
+
                     return (
                       <div className="space-y-3">
-                        {/* Header informativo do Porta-Paletes */}
-                        <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+                        {/* Header informativo do Porta-Paletes + Seletor de Modo Responsivo */}
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 px-1 bg-white/40 dark:bg-white/[0.02] p-2.5 rounded-2xl border border-black/5 dark:border-white/5">
                           <div>
-                            <h3 className="font-display font-extrabold text-xs sm:text-sm text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
-                              <span>🏢 Vista Frontal do Porta-Paletes — Rua {selectedStreet}</span>
-                              <span className="font-mono text-[11px] font-semibold text-mac-blue">
-                                (Andares Nível {maxStreetLevel} ao Nível 1 • Endereços {filteredViewData.rangeObj.label})
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h3 className="font-display font-extrabold text-xs sm:text-sm text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
+                                <span>🏢 Porta-Paletes Vertical — Rua {selectedStreet}</span>
+                              </h3>
+                              <span className="font-mono text-[10px] sm:text-[11px] font-semibold text-mac-blue px-2 py-0.5 rounded-full bg-mac-blue/10">
+                                {activePositions.length} Torre(s) • Níveis {maxStreetLevel} ao 1
                               </span>
-                            </h3>
-                            <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                              Clique em qualquer célula do porta-paletes para inspecionar ou alocar SKU naquela posição exata
+                            </div>
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                              {rackLayoutMode === 'columns'
+                                ? 'Visualização em módulos verticais por torre — adaptado para telas mobile sem rolagem lateral excessiva'
+                                : 'Matriz panorâmica clássica do corredor — visualize todos os andares e prumadas horizontalmente'}
                             </p>
                           </div>
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-black/5 dark:bg-white/10 text-slate-500 dark:text-slate-400 font-semibold">
-                              {uniquePositions.length} Coluna(s) • {maxStreetLevel} Andar(es)
-                            </span>
+
+                          {/* Seletor de Modo: Por Torres (Sem Scroll) vs Matriz Panorâmica */}
+                          <div className="flex items-center gap-1.5 self-start sm:self-auto bg-black/5 dark:bg-white/10 p-1 rounded-xl text-xs font-semibold shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => setRackLayoutMode('columns')}
+                              className={`px-2.5 py-1 rounded-lg transition flex items-center gap-1.5 ${
+                                rackLayoutMode === 'columns'
+                                  ? 'bg-mac-blue text-white shadow-sm font-bold'
+                                  : 'hover:bg-black/5 dark:hover:bg-white/10 text-slate-600 dark:text-slate-300'
+                              }`}
+                              title="Ver em módulos verticais por torre (Sem Scroll Horizontal, ideal para celular)"
+                            >
+                              <span>🏢</span>
+                              <span>Por Torres (Sem Scroll)</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setRackLayoutMode('matrix')}
+                              className={`px-2.5 py-1 rounded-lg transition flex items-center gap-1.5 ${
+                                rackLayoutMode === 'matrix'
+                                  ? 'bg-mac-blue text-white shadow-sm font-bold'
+                                  : 'hover:bg-black/5 dark:hover:bg-white/10 text-slate-600 dark:text-slate-300'
+                              }`}
+                              title="Ver matriz completa horizontal clássica"
+                            >
+                              <span>📑</span>
+                              <span>Matriz Panorâmica</span>
+                            </button>
                           </div>
                         </div>
 
-                        {/* Tabela Matriz Porta-Paletes com rolagem horizontal suave */}
-                        <div className="mac-card rounded-2xl overflow-hidden border border-black/10 dark:border-white/10 shadow-sm">
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-left border-collapse min-w-[700px]">
-                              <thead>
-                                <tr className="border-b border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 text-[11px] font-mono">
-                                  <th className="py-2.5 px-3 font-extrabold uppercase tracking-wider text-slate-500 dark:text-slate-400 sticky left-0 bg-slate-100/95 dark:bg-slate-900/95 z-20 w-32 shrink-0 border-r border-black/10 dark:border-white/10">
-                                    ANDAR / NÍVEL
-                                  </th>
-                                  {uniquePositions.map(pos => {
-                                    const maxLvTower = getMaxLevelsForStreet(selectedStreet, pos);
-                                    return (
-                                      <th
-                                        key={pos}
-                                        className="py-2.5 px-2 text-center font-bold text-slate-600 dark:text-slate-300 min-w-[76px] border-r border-black/5 dark:border-white/5"
-                                      >
-                                        <div className="font-mono text-xs font-extrabold text-slate-700 dark:text-slate-200">
-                                          End. {String(pos).padStart(3, '0')}
-                                        </div>
-                                        <div className="text-[9px] text-slate-400 font-normal">
-                                          {maxLvTower}N
-                                        </div>
-                                      </th>
-                                    );
-                                  })}
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {levelsDescending.map((lv, rowIdx) => {
-                                  const isTop = rowIdx === 0;
-                                  const isBottom = lv === 1;
-                                  const levelLabel = isTop
-                                    ? `Nível ${lv} (Topo)`
-                                    : isBottom
-                                      ? `Nível ${lv} (Piso)`
-                                      : `Nível ${lv}`;
+                        {/* Barra de Sub-Faixas de Torres (Se houver mais de 5 posições) */}
+                        {towerSubchunks.length > 2 && (
+                          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1 px-1 touch-pan-x">
+                            <span className="text-[10px] font-mono font-bold text-slate-400 uppercase tracking-wider shrink-0 mr-1">
+                              Foco:
+                            </span>
+                            {towerSubchunks.map(chunk => (
+                              <button
+                                key={chunk.id}
+                                type="button"
+                                onClick={() => setRackTowerFilter(chunk.id)}
+                                className={`px-2.5 py-1 rounded-lg text-[11px] font-mono whitespace-nowrap transition shrink-0 ${
+                                  rackTowerFilter === chunk.id
+                                    ? 'bg-mac-blue text-white font-bold shadow-sm'
+                                    : 'bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 text-slate-600 dark:text-slate-300'
+                                }`}
+                              >
+                                {chunk.label}
+                              </button>
+                            ))}
+                          </div>
+                        )}
 
-                                  return (
-                                    <tr
-                                      key={lv}
-                                      className="border-b border-black/10 dark:border-white/10 hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition"
-                                    >
-                                      {/* Etiqueta vertical do andar (Coluna Fixa à esquerda) */}
-                                      <td className="py-3 px-3 font-display font-bold text-xs text-mac-blue sticky left-0 bg-slate-100/95 dark:bg-slate-900/95 z-10 border-r border-black/10 dark:border-white/10 shadow-sm whitespace-nowrap">
-                                        <span className="flex items-center gap-1.5">
-                                          <span className="w-1.5 h-1.5 rounded-full bg-mac-blue" />
-                                          <span>{levelLabel}</span>
+                        {/* ============================================================== */}
+                        {/* OPÇÃO 1: MÓDULOS DE TORRES VERTICAIS (RESPONSIVO SEM SCROLL)  */}
+                        {/* ============================================================== */}
+                        {rackLayoutMode === 'columns' ? (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
+                            {activePositions.map(pos => {
+                              const maxLvTower = getMaxLevelsForStreet(selectedStreet, pos);
+                              const towerLevelsDesc = Array.from(
+                                { length: maxLvTower },
+                                (_, i) => maxLvTower - i
+                              );
+
+                              let towerOccupied = 0;
+                              let towerAlerts = 0;
+                              towerLevelsDesc.forEach(lv => {
+                                const w = formatWmsAddress(selectedStreet, pos, lv);
+                                const itms = addressMap.get(w) || [];
+                                if (itms.length > 0) towerOccupied++;
+                                if (conflictAnalysis.allConflictSlots.has(w) || conflictAnalysis.invaderSlots.has(w)) {
+                                  towerAlerts++;
+                                }
+                              });
+
+                              return (
+                                <div
+                                  key={pos}
+                                  className="mac-card rounded-2xl overflow-hidden border border-black/10 dark:border-white/10 shadow-sm flex flex-col bg-white/60 dark:bg-slate-900/40 hover:border-mac-blue/40 transition"
+                                >
+                                  {/* Tower Top Header */}
+                                  <div className="px-3 py-2 bg-black/[0.03] dark:bg-white/[0.04] border-b border-black/10 dark:border-white/10 flex items-center justify-between">
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="font-mono text-xs font-black text-slate-800 dark:text-slate-100">
+                                        Torre {String(pos).padStart(3, '0')}
+                                      </span>
+                                      <span className="font-mono text-[10px] text-mac-blue font-bold px-1.5 py-0.2 rounded bg-mac-blue/10">
+                                        {maxLvTower} Andares
+                                      </span>
+                                    </div>
+                                    <div className="flex items-center gap-1 text-[10px] font-mono">
+                                      {towerAlerts > 0 ? (
+                                        <span className="px-1.5 py-0.5 rounded-full bg-rose-500/20 text-rose-600 dark:text-rose-400 font-extrabold flex items-center gap-1">
+                                          <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-ping inline-block" />
+                                          <span>{towerAlerts} Alerta{towerAlerts > 1 ? 's' : ''}</span>
                                         </span>
-                                      </td>
+                                      ) : (
+                                        <span className="text-slate-500 dark:text-slate-400 font-semibold">
+                                          {towerOccupied}/{maxLvTower} ocup.
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
 
-                                      {/* Células de cada coluna/torre para este nível */}
-                                      {uniquePositions.map(pos => {
-                                        const maxLvTower = getMaxLevelsForStreet(selectedStreet, pos);
-                                        const existsAtThisTower = lv <= maxLvTower;
-                                        const wms = formatWmsAddress(selectedStreet, pos, lv);
-                                        const items = existsAtThisTower ? addressMap.get(wms) || [] : [];
-                                        const primary = items[0] || null;
-                                        const isSelected = selectedAddressKey === wms;
-                                        const isTrb = Boolean(transbordoRegistry[wms]);
-                                        const isTrbSelected = transbordoSelectedWms.includes(wms);
-                                        const isLow =
-                                          highlightLowStockGreen &&
-                                          conflictAnalysis.lowStockSlots.has(wms) &&
-                                          !isTrb;
-                                        const isConflict = conflictAnalysis.allConflictSlots.has(wms);
-                                        const isInvader = conflictAnalysis.invaderSlots.has(wms);
-                                        const totalQty = items
-                                          .filter(i => !i.isTransbordo)
-                                          .reduce((acc, it) => acc + (typeof it.qty === 'number' ? it.qty : 1), 0);
+                                  {/* Vertical Levels Stack (Topo down to Piso) */}
+                                  <div className="p-2 space-y-1.5 flex-1 flex flex-col justify-between">
+                                    {towerLevelsDesc.map(lv => {
+                                      const wms = formatWmsAddress(selectedStreet, pos, lv);
+                                      const items = addressMap.get(wms) || [];
+                                      const primary = items[0] || null;
+                                      const isSelected = selectedAddressKey === wms;
+                                      const isTrb = Boolean(transbordoRegistry[wms]);
+                                      const isTrbSelected = transbordoSelectedWms.includes(wms);
+                                      const isLow = highlightLowStockGreen && conflictAnalysis.lowStockSlots.has(wms) && !isTrb;
+                                      const isConflict = conflictAnalysis.allConflictSlots.has(wms);
+                                      const isInvader = conflictAnalysis.invaderSlots.has(wms);
+                                      const totalQty = items
+                                        .filter(i => !i.isTransbordo)
+                                        .reduce((acc, it) => acc + (typeof it.qty === 'number' ? it.qty : 1), 0);
 
-                                        if (!existsAtThisTower) {
+                                      return (
+                                        <div
+                                          key={lv}
+                                          draggable={Boolean(primary && !isTrb)}
+                                          onDragStart={() => {
+                                            if (primary && !isTrb) {
+                                              setDragPayload({
+                                                skuId: primary.id,
+                                                fromWms: wms,
+                                                mode: 'group'
+                                              });
+                                            }
+                                          }}
+                                          onDragOver={e => {
+                                            e.preventDefault();
+                                            setDragOverKey(wms);
+                                          }}
+                                          onDragLeave={() => setDragOverKey(null)}
+                                          onDrop={e => {
+                                            e.preventDefault();
+                                            handleDropOnSlot(wms);
+                                          }}
+                                          onClick={() => handleCellClick(wms, primary)}
+                                          className={`min-h-[50px] rounded-xl p-2 flex items-center justify-between gap-2.5 cursor-pointer transition relative text-[11px] font-mono border ${
+                                            isTrb
+                                              ? 'transbordo-rack-cell'
+                                              : isLow
+                                                ? 'low-stock-green-rack-cell shadow-sm'
+                                                : isConflict
+                                                  ? pulseAlertsEnabled
+                                                    ? 'rack-conflict-pulse'
+                                                    : 'bg-rose-500/20 border-2 border-rose-500 text-rose-700 dark:text-rose-200'
+                                                  : isInvader
+                                                    ? pulseAlertsEnabled
+                                                      ? 'rack-invader-pulse'
+                                                      : 'bg-amber-500/20 border-2 border-amber-500 text-amber-800 dark:text-amber-200'
+                                                    : primary
+                                                      ? 'bg-emerald-500/10 border-emerald-500/35 hover:border-emerald-500 text-emerald-950 dark:text-emerald-100'
+                                                      : 'bg-black/[0.02] dark:bg-white/[0.02] border-dashed border-black/15 dark:border-white/15 hover:border-mac-blue text-slate-400'
+                                          } ${
+                                            isSelected
+                                              ? 'ring-2 ring-mac-blue shadow-md border-mac-blue bg-mac-blue/10'
+                                              : ''
+                                          } ${isTrbSelected ? 'transbordo-selected-slot' : ''} ${
+                                            dragOverKey === wms
+                                              ? 'ring-2 ring-purple-500 scale-[1.02]'
+                                              : ''
+                                          }`}
+                                        >
+                                          {/* Level Indicator Pill */}
+                                          <div
+                                            className={`px-2 py-1 rounded-lg font-mono text-[10px] font-extrabold flex flex-col items-center justify-center shrink-0 min-w-[44px] ${
+                                              lv === maxLvTower
+                                                ? 'bg-mac-blue/15 text-mac-blue border border-mac-blue/30'
+                                                : lv === 1
+                                                  ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30'
+                                                  : 'bg-black/5 dark:bg-white/10 text-slate-500 dark:text-slate-400'
+                                            }`}
+                                          >
+                                            <span>N{lv}</span>
+                                            <span className="text-[8px] font-normal opacity-80 leading-none">
+                                              {lv === maxLvTower ? 'Topo' : lv === 1 ? 'Piso' : 'Andar'}
+                                            </span>
+                                          </div>
+
+                                          {/* Center SKU & Item Details */}
+                                          <div className="flex-1 min-w-0 flex flex-col justify-center">
+                                            {primary ? (
+                                              <>
+                                                <div className="flex items-center justify-between gap-1 leading-tight">
+                                                  <span className="font-extrabold text-xs text-slate-900 dark:text-slate-100 truncate">
+                                                    {isTrb ? 'TRANSBORDO' : primary.code.split(' - ')[0]}
+                                                  </span>
+                                                  <span className="font-bold text-[10px] px-1.5 py-0.2 rounded bg-black/5 dark:bg-white/10 text-slate-700 dark:text-slate-200 shrink-0">
+                                                    {totalQty} pç{totalQty === 1 ? '' : 's'}
+                                                  </span>
+                                                </div>
+                                                <div className="flex items-center justify-between gap-1 mt-0.5 text-[9px] text-slate-500 dark:text-slate-400">
+                                                  <div className="flex items-center gap-1 truncate">
+                                                    <span
+                                                      className="w-2.5 h-2.5 rounded-full border border-black/30 shrink-0"
+                                                      style={{ backgroundColor: primary.colorHex }}
+                                                    />
+                                                    <span className="truncate font-semibold">
+                                                      {primary.colorCode} • {primary.size}
+                                                    </span>
+                                                  </div>
+                                                  <span className="opacity-70 font-mono shrink-0">
+                                                    {wms}
+                                                  </span>
+                                                </div>
+                                              </>
+                                            ) : (
+                                              <div className="flex items-center justify-between text-slate-400 dark:text-slate-500">
+                                                <span className="text-xs font-semibold">+ Livre / Disponível</span>
+                                                <span className="text-[9px] font-mono opacity-60">{wms}</span>
+                                              </div>
+                                            )}
+                                          </div>
+
+                                          {/* Status Icon Indicator */}
+                                          <div className="shrink-0 flex items-center">
+                                            {isTrb ? (
+                                              <span className="text-base" title="Transbordo Bloqueado">⚡</span>
+                                            ) : isConflict ? (
+                                              <span className="text-rose-600 font-extrabold text-xs flex items-center gap-1" title="Conflito / Sobreposição">
+                                                <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping inline-block" />
+                                                <span>🚨</span>
+                                              </span>
+                                            ) : isInvader ? (
+                                              <span className="text-amber-600 font-extrabold text-xs flex items-center gap-1" title="SKU Invasor">
+                                                <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping inline-block" />
+                                                <span>⚠️</span>
+                                              </span>
+                                            ) : isLow ? (
+                                              <span className="text-[9px] font-bold text-emerald-700 dark:text-emerald-300 px-1 py-0.2 rounded bg-emerald-500/20">
+                                                &lt;5pç
+                                              </span>
+                                            ) : null}
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          /* ============================================================== */
+                          /* OPÇÃO 2: TABELA MATRIZ PANORÂMICA (HORIZONTAL CLÁSSICA)        */
+                          /* ============================================================== */
+                          <div className="mac-card rounded-2xl overflow-hidden border border-black/10 dark:border-white/10 shadow-sm">
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-left border-collapse min-w-[700px]">
+                                <thead>
+                                  <tr className="border-b border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 text-[11px] font-mono">
+                                    <th className="py-2.5 px-3 font-extrabold uppercase tracking-wider text-slate-500 dark:text-slate-400 sticky left-0 bg-slate-100/95 dark:bg-slate-900/95 z-20 w-32 shrink-0 border-r border-black/10 dark:border-white/10">
+                                      ANDAR / NÍVEL
+                                    </th>
+                                    {activePositions.map(pos => {
+                                      const maxLvTower = getMaxLevelsForStreet(selectedStreet, pos);
+                                      return (
+                                        <th
+                                          key={pos}
+                                          className="py-2.5 px-2 text-center font-bold text-slate-600 dark:text-slate-300 min-w-[76px] border-r border-black/5 dark:border-white/5"
+                                        >
+                                          <div className="font-mono text-xs font-extrabold text-slate-700 dark:text-slate-200">
+                                            End. {String(pos).padStart(3, '0')}
+                                          </div>
+                                          <div className="text-[9px] text-slate-400 font-normal">
+                                            {maxLvTower}N
+                                          </div>
+                                        </th>
+                                      );
+                                    })}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {levelsDescending.map((lv, rowIdx) => {
+                                    const isTop = rowIdx === 0;
+                                    const isBottom = lv === 1;
+                                    const levelLabel = isTop
+                                      ? `Nível ${lv} (Topo)`
+                                      : isBottom
+                                        ? `Nível ${lv} (Piso)`
+                                        : `Nível ${lv}`;
+
+                                    return (
+                                      <tr
+                                        key={lv}
+                                        className="border-b border-black/10 dark:border-white/10 hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition"
+                                      >
+                                        {/* Etiqueta vertical do andar (Coluna Fixa à esquerda) */}
+                                        <td className="py-3 px-3 font-display font-bold text-xs text-mac-blue sticky left-0 bg-slate-100/95 dark:bg-slate-900/95 z-10 border-r border-black/10 dark:border-white/10 shadow-sm whitespace-nowrap">
+                                          <span className="flex items-center gap-1.5">
+                                            <span className="w-1.5 h-1.5 rounded-full bg-mac-blue" />
+                                            <span>{levelLabel}</span>
+                                          </span>
+                                        </td>
+
+                                        {/* Células de cada coluna/torre para este nível */}
+                                        {activePositions.map(pos => {
+                                          const maxLvTower = getMaxLevelsForStreet(selectedStreet, pos);
+                                          const existsAtThisTower = lv <= maxLvTower;
+                                          const wms = formatWmsAddress(selectedStreet, pos, lv);
+                                          const items = existsAtThisTower ? addressMap.get(wms) || [] : [];
+                                          const primary = items[0] || null;
+                                          const isSelected = selectedAddressKey === wms;
+                                          const isTrb = Boolean(transbordoRegistry[wms]);
+                                          const isTrbSelected = transbordoSelectedWms.includes(wms);
+                                          const isLow =
+                                            highlightLowStockGreen &&
+                                            conflictAnalysis.lowStockSlots.has(wms) &&
+                                            !isTrb;
+                                          const isConflict = conflictAnalysis.allConflictSlots.has(wms);
+                                          const isInvader = conflictAnalysis.invaderSlots.has(wms);
+                                          const totalQty = items
+                                            .filter(i => !i.isTransbordo)
+                                            .reduce((acc, it) => acc + (typeof it.qty === 'number' ? it.qty : 1), 0);
+
+                                          if (!existsAtThisTower) {
+                                            return (
+                                              <td
+                                                key={pos}
+                                                className="p-1.5 text-center bg-black/5 dark:bg-white/[0.02] border-r border-black/5 dark:border-white/5 opacity-30 select-none"
+                                              >
+                                                <span className="text-[10px] font-mono text-slate-400">
+                                                  —
+                                                </span>
+                                              </td>
+                                            );
+                                          }
+
                                           return (
                                             <td
                                               key={pos}
-                                              className="p-1.5 text-center bg-black/5 dark:bg-white/[0.02] border-r border-black/5 dark:border-white/5 opacity-30 select-none"
+                                              className="p-1 border-r border-black/5 dark:border-white/5"
                                             >
-                                              <span className="text-[10px] font-mono text-slate-400">
-                                                —
-                                              </span>
-                                            </td>
-                                          );
-                                        }
-
-                                        return (
-                                          <td
-                                            key={pos}
-                                            className="p-1 border-r border-black/5 dark:border-white/5"
-                                          >
-                                            <div
-                                              draggable={Boolean(primary && !isTrb)}
-                                              onDragStart={() => {
-                                                if (primary && !isTrb) {
-                                                  setDragPayload({
-                                                    skuId: primary.id,
-                                                    fromWms: wms,
-                                                    mode: 'group'
-                                                  });
-                                                }
-                                              }}
-                                              onDragOver={e => {
-                                                e.preventDefault();
-                                                setDragOverKey(wms);
-                                              }}
-                                              onDragLeave={() => setDragOverKey(null)}
-                                              onDrop={e => {
-                                                e.preventDefault();
-                                                handleDropOnSlot(wms);
-                                              }}
-                                              onClick={() => {
-                                                if (interactiveTargetMode === 'pick_empty') {
-                                                  const activeItem = inspectedSlot.items.find(it => it.id === selectedSkuId) || inspectedSlot.items[0];
-                                                  if (activeItem) {
-                                                    handleQuickMoveToEmpty(activeItem, wms);
+                                              <div
+                                                draggable={Boolean(primary && !isTrb)}
+                                                onDragStart={() => {
+                                                  if (primary && !isTrb) {
+                                                    setDragPayload({
+                                                      skuId: primary.id,
+                                                      fromWms: wms,
+                                                      mode: 'group'
+                                                    });
                                                   }
-                                                  return;
-                                                }
-                                                if (interactiveTargetMode === 'pick_swap') {
-                                                  const activeItem = inspectedSlot.items.find(it => it.id === selectedSkuId) || inspectedSlot.items[0];
-                                                  if (activeItem) {
-                                                    handleSwapSlots(activeItem, wms);
-                                                  }
-                                                  return;
-                                                }
-                                                if (transbordoSelectMode) {
-                                                  handleToggleTransbordoSlotSelection(wms);
-                                                } else {
-                                                  setSelectedAddressKey(wms);
-                                                  if (primary) setSelectedSkuId(primary.id);
-                                                  if (typeof window !== 'undefined' && window.innerWidth < 1024) {
-                                                    setInspectorOpenMobile(true);
-                                                  }
-                                                }
-                                              }}
-                                              className={`h-16 rounded-xl p-1.5 flex flex-col justify-between cursor-pointer transition relative text-[10px] font-mono ${
-                                                isTrb
-                                                  ? 'transbordo-rack-cell'
-                                                  : isLow
-                                                    ? 'low-stock-green-rack-cell shadow-sm'
-                                                    : isConflict
-                                                      ? pulseAlertsEnabled
-                                                        ? 'rack-conflict-pulse'
-                                                        : 'bg-rose-500/20 border-2 border-rose-500 text-rose-700 dark:text-rose-200'
-                                                      : isInvader
+                                                }}
+                                                onDragOver={e => {
+                                                  e.preventDefault();
+                                                  setDragOverKey(wms);
+                                                }}
+                                                onDragLeave={() => setDragOverKey(null)}
+                                                onDrop={e => {
+                                                  e.preventDefault();
+                                                  handleDropOnSlot(wms);
+                                                }}
+                                                onClick={() => handleCellClick(wms, primary)}
+                                                className={`h-16 rounded-xl p-1.5 flex flex-col justify-between cursor-pointer transition relative text-[10px] font-mono ${
+                                                  isTrb
+                                                    ? 'transbordo-rack-cell'
+                                                    : isLow
+                                                      ? 'low-stock-green-rack-cell shadow-sm'
+                                                      : isConflict
                                                         ? pulseAlertsEnabled
-                                                          ? 'rack-invader-pulse'
-                                                          : 'bg-amber-500/20 border-2 border-amber-500 text-amber-800 dark:text-amber-200'
-                                                        : primary
-                                                          ? 'bg-emerald-500/15 border border-emerald-500/40 text-emerald-900 dark:text-emerald-200'
-                                                          : 'bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 hover:border-mac-blue text-slate-400'
-                                              } ${
-                                                isSelected
-                                                  ? 'ring-2 ring-mac-blue shadow-md border-mac-blue'
-                                                  : ''
-                                              } ${isTrbSelected ? 'transbordo-selected-slot' : ''} ${
-                                                dragOverKey === wms
-                                                  ? 'ring-2 ring-purple-500 scale-[1.04]'
-                                                  : ''
-                                              }`}
-                                            >
-                                              {/* Endereço resumido no topo */}
-                                              <div className="flex items-center justify-between font-bold leading-tight">
-                                                <span className="opacity-75 text-[9px]">
-                                                  {String(pos).padStart(3, '0')}-N{lv}
-                                                </span>
-                                                {isTrb ? (
-                                                  <span className="text-[10px]" title="Transbordo Bloqueado">⚡</span>
-                                                ) : isConflict ? (
-                                                  <span className="text-rose-600 dark:text-rose-400 font-extrabold text-[9px] flex items-center gap-0.5" title="Conflito / Sobreposição">
-                                                    <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-ping inline-block" />
-                                                    <span>🚨</span>
+                                                          ? 'rack-conflict-pulse'
+                                                          : 'bg-rose-500/20 border-2 border-rose-500 text-rose-700 dark:text-rose-200'
+                                                        : isInvader
+                                                          ? pulseAlertsEnabled
+                                                            ? 'rack-invader-pulse'
+                                                            : 'bg-amber-500/20 border-2 border-amber-500 text-amber-800 dark:text-amber-200'
+                                                          : primary
+                                                            ? 'bg-emerald-500/15 border border-emerald-500/40 text-emerald-900 dark:text-emerald-200'
+                                                            : 'bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 hover:border-mac-blue text-slate-400'
+                                                } ${
+                                                  isSelected
+                                                    ? 'ring-2 ring-mac-blue shadow-md border-mac-blue'
+                                                    : ''
+                                                } ${isTrbSelected ? 'transbordo-selected-slot' : ''} ${
+                                                  dragOverKey === wms
+                                                    ? 'ring-2 ring-purple-500 scale-[1.04]'
+                                                    : ''
+                                                }`}
+                                              >
+                                                {/* Endereço resumido no topo */}
+                                                <div className="flex items-center justify-between font-bold leading-tight">
+                                                  <span className="opacity-75 text-[9px]">
+                                                    {String(pos).padStart(3, '0')}-N{lv}
                                                   </span>
-                                                ) : isInvader ? (
-                                                  <span className="text-amber-600 dark:text-amber-400 font-extrabold text-[9px] flex items-center gap-0.5" title="SKU Invasor (fora do local)">
-                                                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping inline-block" />
-                                                    <span>⚠️</span>
-                                                  </span>
-                                                ) : primary ? (
-                                                  <span className="font-bold text-[9px]">
-                                                    {totalQty}pç
-                                                  </span>
-                                                ) : (
-                                                  <span className="text-slate-400 text-[8px] font-normal">
-                                                    Livre
-                                                  </span>
-                                                )}
-                                              </div>
-
-                                              {/* SKU ou Status no meio */}
-                                              {primary ? (
-                                                <div className="truncate font-extrabold text-[10px] leading-tight my-auto text-center">
                                                   {isTrb ? (
-                                                    <span className="text-slate-950 dark:text-yellow-100">TRANSBORDO</span>
+                                                    <span className="text-[10px]" title="Transbordo Bloqueado">⚡</span>
+                                                  ) : isConflict ? (
+                                                    <span className="text-rose-600 dark:text-rose-400 font-extrabold text-[9px] flex items-center gap-0.5" title="Conflito / Sobreposição">
+                                                      <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-ping inline-block" />
+                                                      <span>🚨</span>
+                                                    </span>
+                                                  ) : isInvader ? (
+                                                    <span className="text-amber-600 dark:text-amber-400 font-extrabold text-[9px] flex items-center gap-0.5" title="SKU Invasor (fora do local)">
+                                                      <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping inline-block" />
+                                                      <span>⚠️</span>
+                                                    </span>
+                                                  ) : primary ? (
+                                                    <span className="font-bold text-[9px]">
+                                                      {totalQty}pç
+                                                    </span>
                                                   ) : (
-                                                    <span>{primary.code.split(' - ')[0]}</span>
+                                                    <span className="text-slate-400 text-[8px] font-normal">
+                                                      Livre
+                                                    </span>
                                                   )}
                                                 </div>
-                                              ) : (
-                                                <div className="text-center opacity-40 text-[9px] my-auto">
-                                                  + Vazio
-                                                </div>
-                                              )}
 
-                                              {/* Cor e Tam ou Detalhe na base */}
-                                              {primary ? (
-                                                <div className="flex items-center justify-between text-[8px] opacity-85 truncate">
-                                                  <span
-                                                    className="w-2 h-2 rounded-full border border-black/30 shrink-0"
-                                                    style={{ backgroundColor: primary.colorHex }}
-                                                  />
-                                                  <span className="truncate ml-1 font-semibold">
-                                                    {primary.colorCode} • {primary.size}
-                                                  </span>
-                                                </div>
-                                              ) : (
-                                                <div className="text-[8px] text-center text-slate-400">
-                                                  {wms}
-                                                </div>
-                                              )}
-                                            </div>
-                                          </td>
-                                        );
-                                      })}
-                                    </tr>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
+                                                {/* SKU ou Status no meio */}
+                                                {primary ? (
+                                                  <div className="truncate font-extrabold text-[10px] leading-tight my-auto text-center">
+                                                    {isTrb ? (
+                                                      <span className="text-slate-950 dark:text-yellow-100">TRANSBORDO</span>
+                                                    ) : (
+                                                      <span>{primary.code.split(' - ')[0]}</span>
+                                                    )}
+                                                  </div>
+                                                ) : (
+                                                  <div className="text-center opacity-40 text-[9px] my-auto">
+                                                    + Vazio
+                                                  </div>
+                                                )}
+
+                                                {/* Cor e Tam ou Detalhe na base */}
+                                                {primary ? (
+                                                  <div className="flex items-center justify-between text-[8px] opacity-85 truncate">
+                                                    <span
+                                                      className="w-2 h-2 rounded-full border border-black/30 shrink-0"
+                                                      style={{ backgroundColor: primary.colorHex }}
+                                                    />
+                                                    <span className="truncate ml-1 font-semibold">
+                                                      {primary.colorCode} • {primary.size}
+                                                    </span>
+                                                  </div>
+                                                ) : (
+                                                  <div className="text-[8px] text-center text-slate-400">
+                                                    {wms}
+                                                  </div>
+                                                )}
+                                              </div>
+                                            </td>
+                                          );
+                                        })}
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
                           </div>
-                        </div>
+                        )}
                       </div>
                     );
                   })()
@@ -3505,10 +3812,12 @@ export default function App() {
             )}
             {/* RIGHT INSPECTOR PANEL */}
             <aside
-              className={`w-88 max-w-[92vw] shrink-0 border-l border-black/10 dark:border-white/10 p-3.5 overflow-y-auto flex flex-col justify-between transition-all duration-200 z-50 ${
+              className={`shrink-0 border-l border-black/10 dark:border-white/10 p-3.5 overflow-y-auto flex flex-col justify-between transition-all duration-300 z-50 ${
                 inspectorOpenMobile
-                  ? 'fixed inset-y-0 right-0 shadow-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-l border-black/15 dark:border-white/15'
-                  : 'hidden lg:flex bg-white/45 dark:bg-black/25'
+                  ? 'fixed inset-y-0 right-0 w-88 max-w-[92vw] shadow-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-l border-black/15 dark:border-white/15'
+                  : inspectorCollapsedDesktop
+                    ? 'hidden'
+                    : 'hidden lg:flex w-88 max-w-[92vw] bg-white/45 dark:bg-black/25'
               }`}
             >
               <div className="space-y-4">
@@ -3522,11 +3831,15 @@ export default function App() {
                     </span>
                     <button
                       type="button"
-                      onClick={() => setInspectorOpenMobile(false)}
-                      className="lg:hidden px-2.5 py-1 rounded-lg bg-black/10 dark:bg-white/10 hover:bg-rose-500 hover:text-white text-xs font-bold transition flex items-center gap-1"
+                      onClick={() => {
+                        setInspectorOpenMobile(false);
+                        setInspectorCollapsedDesktop(true);
+                      }}
+                      className="px-2 py-0.5 rounded-lg bg-black/10 dark:bg-white/10 hover:bg-rose-500 hover:text-white text-xs font-bold transition flex items-center gap-1"
+                      title="Fechar ou recolher inspetor"
                     >
                       <span>✕</span>
-                      <span>Fechar</span>
+                      <span className="text-[10px]">Fechar</span>
                     </button>
                   </div>
                 </div>
