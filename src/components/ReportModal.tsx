@@ -895,12 +895,13 @@ const StreetOccupancyBarChart: React.FC<StreetOccupancyBarChartProps> = ({
   useEffect(() => {
     if (!svgRef.current || data.length === 0) return;
 
-    const svg = d3.select(svgRef.current);
-    svg.selectAll('*').remove();
+    try {
+      const svg = d3.select(svgRef.current);
+      svg.selectAll('*').remove();
 
-    const margin = { top: 25, right: 25, bottom: 45, left: 45 };
-    const width = Math.max(700, data.length * 36) - margin.left - margin.right;
-    const height = 260 - margin.top - margin.bottom;
+      const margin = { top: 25, right: 25, bottom: 45, left: 45 };
+      const width = Math.max(700, data.length * 36) - margin.left - margin.right;
+      const height = 260 - margin.top - margin.bottom;
 
     const g = svg
       .attr('width', width + margin.left + margin.right)
@@ -1050,6 +1051,9 @@ const StreetOccupancyBarChart: React.FC<StreetOccupancyBarChartProps> = ({
       .on('click', (_, d: StreetStatItem) => {
         onBarClick(d);
       });
+    } catch (err) {
+      console.error('StreetOccupancyBarChart render error:', err);
+    }
   }, [data, onBarHover, onBarClick]);
 
   return <svg ref={svgRef} className="mx-auto block select-none text-slate-700 dark:text-slate-200" />;
@@ -1072,113 +1076,132 @@ const CollectionDonutChart: React.FC<CollectionDonutChartProps> = ({
   const svgRef = useRef<SVGSVGElement | null>(null);
 
   useEffect(() => {
-    if (!svgRef.current || data.length === 0) return;
+    if (!svgRef.current) return;
 
     const svg = d3.select(svgRef.current);
     svg.selectAll('*').remove();
 
-    const width = 280;
-    const height = 240;
-    const radius = Math.min(width, height) / 2 - 16;
-    const innerRadius = radius * 0.58;
+    if (data.length === 0 || totalPieces <= 0) {
+      svg
+        .attr('width', 280)
+        .attr('height', 80)
+        .append('text')
+        .attr('x', 140)
+        .attr('y', 45)
+        .attr('text-anchor', 'middle')
+        .attr('font-size', '11px')
+        .attr('fill', 'currentColor')
+        .attr('opacity', 0.5)
+        .text('Nenhuma peça registrada nesta perspectiva');
+      return;
+    }
 
-    const g = svg
-      .attr('width', width)
-      .attr('height', height)
-      .append('g')
-      .attr('transform', `translate(${width / 2},${height / 2})`);
+    try {
+      const width = 280;
+      const height = 240;
+      const radius = Math.min(width, height) / 2 - 16;
+      const innerRadius = radius * 0.58;
 
-    const colorPalette = [
-      '#6366F1', // Indigo
-      '#0A84FF', // Mac Blue
-      '#10B981', // Emerald
-      '#F59E0B', // Amber
-      '#EC4899', // Pink
-      '#8B5CF6', // Purple
-      '#14B8A6'  // Teal
-    ];
+      const g = svg
+        .attr('width', width)
+        .attr('height', height)
+        .append('g')
+        .attr('transform', `translate(${width / 2},${height / 2})`);
 
-    const pie = d3
-      .pie<CollectionStatItem>()
-      .value(d => d.pieces)
-      .sort(null)
-      .padAngle(0.03);
+      const colorPalette = [
+        '#6366F1', // Indigo
+        '#0A84FF', // Mac Blue
+        '#10B981', // Emerald
+        '#F59E0B', // Amber
+        '#EC4899', // Pink
+        '#8B5CF6', // Purple
+        '#14B8A6'  // Teal
+      ];
 
-    const arc = d3
-      .arc<d3.PieArcDatum<CollectionStatItem>>()
-      .innerRadius(innerRadius)
-      .outerRadius(radius)
-      .cornerRadius(4);
+      const pie = d3
+        .pie<CollectionStatItem>()
+        .value(d => d.pieces)
+        .sort(null)
+        .padAngle(0.03);
 
-    const arcHover = d3
-      .arc<d3.PieArcDatum<CollectionStatItem>>()
-      .innerRadius(innerRadius)
-      .outerRadius(radius + 7)
-      .cornerRadius(5);
+      const arc = d3
+        .arc<d3.PieArcDatum<CollectionStatItem>>()
+        .innerRadius(innerRadius)
+        .outerRadius(radius)
+        .cornerRadius(4);
 
-    const arcs = g
-      .selectAll('.arc')
-      .data(pie(data))
-      .enter()
-      .append('g')
-      .attr('class', 'arc')
-      .style('cursor', 'pointer');
+      const arcHover = d3
+        .arc<d3.PieArcDatum<CollectionStatItem>>()
+        .innerRadius(innerRadius)
+        .outerRadius(radius + 7)
+        .cornerRadius(5);
 
-    arcs
-      .append('path')
-      .attr('d', d => arc(d) || '')
-      .attr('fill', (_, i) => colorPalette[i % colorPalette.length])
-      .attr('opacity', 0.88)
-      .transition()
-      .duration(700)
-      .attrTween('d', function (d) {
-        const interpolate = d3.interpolate({ startAngle: 0, endAngle: 0 }, d);
-        return function (t) {
-          return arc(interpolate(t)) || '';
-        };
-      });
+      const arcs = g
+        .selectAll('.arc')
+        .data(pie(data))
+        .enter()
+        .append('g')
+        .attr('class', 'arc')
+        .style('cursor', 'pointer');
 
-    // Texto Central do Donut
-    g.append('text')
-      .attr('text-anchor', 'middle')
-      .attr('dy', '-0.3em')
-      .attr('font-family', 'JetBrains Mono, monospace')
-      .attr('font-size', '17px')
-      .attr('font-weight', '800')
-      .attr('fill', 'currentColor')
-      .text(totalPieces.toLocaleString('pt-BR'));
+      arcs
+        .append('path')
+        .attr('d', d => arc(d) || '')
+        .attr('fill', (_, i) => colorPalette[i % colorPalette.length])
+        .attr('opacity', 0.88)
+        .transition()
+        .duration(700)
+        .attrTween('d', function (d) {
+          const interpolate = d3.interpolate({ startAngle: 0, endAngle: 0 }, d);
+          return function (t) {
+            return arc(interpolate(t)) || '';
+          };
+        });
 
-    g.append('text')
-      .attr('text-anchor', 'middle')
-      .attr('dy', '1.2em')
-      .attr('font-size', '10px')
-      .attr('font-weight', 'bold')
-      .attr('opacity', 0.5)
-      .attr('fill', 'currentColor')
-      .text('TOTAL PEÇAS');
+      // Texto Central do Donut
+      g.append('text')
+        .attr('text-anchor', 'middle')
+        .attr('dy', '-0.3em')
+        .attr('font-family', 'JetBrains Mono, monospace')
+        .attr('font-size', '17px')
+        .attr('font-weight', '800')
+        .attr('fill', 'currentColor')
+        .text(totalPieces.toLocaleString('pt-BR'));
 
-    arcs
-      .on('mouseenter', function (event: MouseEvent, d: d3.PieArcDatum<CollectionStatItem>) {
-        d3.select(this as SVGGElement)
-          .select('path')
-          .transition()
-          .duration(150)
-          .attr('d', () => arcHover(d) || '')
-          .attr('opacity', 1);
-        onSliceHover(d.data, event.clientX, event.clientY);
-      })
-      .on('mousemove', function (event: MouseEvent, d: d3.PieArcDatum<CollectionStatItem>) {
-        onSliceHover(d.data, event.clientX, event.clientY);
-      })
-      .on('mouseleave', function (_: MouseEvent, d: d3.PieArcDatum<CollectionStatItem>) {
-        d3.select(this as SVGGElement)
-          .select('path')
-          .transition()
-          .duration(150)
-          .attr('d', () => arc(d) || '')
-          .attr('opacity', 0.88);
-        onSliceHover(null);
-      });
+      g.append('text')
+        .attr('text-anchor', 'middle')
+        .attr('dy', '1.2em')
+        .attr('font-size', '10px')
+        .attr('font-weight', 'bold')
+        .attr('opacity', 0.5)
+        .attr('fill', 'currentColor')
+        .text('TOTAL PEÇAS');
+
+      arcs
+        .on('mouseenter', function (event: MouseEvent, d: d3.PieArcDatum<CollectionStatItem>) {
+          d3.select(this as SVGGElement)
+            .select('path')
+            .transition()
+            .duration(150)
+            .attr('d', () => arcHover(d) || '')
+            .attr('opacity', 1);
+          onSliceHover(d.data, event.clientX, event.clientY);
+        })
+        .on('mousemove', function (event: MouseEvent, d: d3.PieArcDatum<CollectionStatItem>) {
+          onSliceHover(d.data, event.clientX, event.clientY);
+        })
+        .on('mouseleave', function (_: MouseEvent, d: d3.PieArcDatum<CollectionStatItem>) {
+          d3.select(this as SVGGElement)
+            .select('path')
+            .transition()
+            .duration(150)
+            .attr('d', () => arc(d) || '')
+            .attr('opacity', 0.88);
+          onSliceHover(null);
+        });
+    } catch (err) {
+      console.error('CollectionDonutChart render error:', err);
+    }
   }, [data, totalPieces, onSliceHover]);
 
   return (
@@ -1219,109 +1242,113 @@ const LevelDensityBarChart: React.FC<LevelDensityBarChartProps> = ({ data, onBar
   useEffect(() => {
     if (!svgRef.current || data.length === 0) return;
 
-    const svg = d3.select(svgRef.current);
-    svg.selectAll('*').remove();
+    try {
+      const svg = d3.select(svgRef.current);
+      svg.selectAll('*').remove();
 
-    const margin = { top: 15, right: 35, bottom: 25, left: 55 };
-    const width = 360 - margin.left - margin.right;
-    const height = 240 - margin.top - margin.bottom;
+      const margin = { top: 15, right: 35, bottom: 25, left: 55 };
+      const width = 360 - margin.left - margin.right;
+      const height = 240 - margin.top - margin.bottom;
 
-    const g = svg
-      .attr('width', width + margin.left + margin.right)
-      .attr('height', height + margin.top + margin.bottom)
-      .append('g')
-      .attr('transform', `translate(${margin.left},${margin.top})`);
+      const g = svg
+        .attr('width', width + margin.left + margin.right)
+        .attr('height', height + margin.top + margin.bottom)
+        .append('g')
+        .attr('transform', `translate(${margin.left},${margin.top})`);
 
-    // Invertido: Nível 7 no topo, Nível 1 no piso!
-    const y = d3
-      .scaleBand()
-      .domain([7, 6, 5, 4, 3, 2, 1].map(String))
-      .range([0, height])
-      .padding(0.24);
+      // Invertido: Nível 7 no topo, Nível 1 no piso!
+      const y = d3
+        .scaleBand()
+        .domain([7, 6, 5, 4, 3, 2, 1].map(String))
+        .range([0, height])
+        .padding(0.24);
 
-    const maxPieces = d3.max(data, d => d.pieces) || 1;
-    const x = d3.scaleLinear().domain([0, maxPieces]).range([0, width]);
+      const maxPieces = d3.max(data, d => d.pieces) || 1;
+      const x = d3.scaleLinear().domain([0, maxPieces]).range([0, width]);
 
-    // Eixo Y (Níveis)
-    const yAxis = g.append('g').call(
-      d3.axisLeft(y).tickFormat(d => `Nível ${d}`)
-    );
+      // Eixo Y (Níveis)
+      const yAxis = g.append('g').call(
+        d3.axisLeft(y).tickFormat(d => `Nível ${d}`)
+      );
 
-    yAxis.selectAll('text')
-      .attr('font-family', 'Plus Jakarta Sans, sans-serif')
-      .attr('font-size', '10px')
-      .attr('font-weight', '700')
-      .attr('fill', 'currentColor')
-      .attr('opacity', 0.85);
+      yAxis.selectAll('text')
+        .attr('font-family', 'Plus Jakarta Sans, sans-serif')
+        .attr('font-size', '10px')
+        .attr('font-weight', '700')
+        .attr('fill', 'currentColor')
+        .attr('opacity', 0.85);
 
-    // Barras Horizontais
-    const bars = g
-      .selectAll('.level-bar')
-      .data(data)
-      .enter()
-      .append('g')
-      .attr('class', 'level-bar')
-      .style('cursor', 'pointer');
+      // Barras Horizontais
+      const bars = g
+        .selectAll('.level-bar')
+        .data(data)
+        .enter()
+        .append('g')
+        .attr('class', 'level-bar')
+        .style('cursor', 'pointer');
 
-    // Fundo cinza suave
-    bars.append('rect')
-      .attr('x', 0)
-      .attr('y', d => y(String(d.level)) || 0)
-      .attr('width', width)
-      .attr('height', y.bandwidth())
-      .attr('rx', 4)
-      .attr('fill', 'currentColor')
-      .attr('opacity', 0.04);
+      // Fundo cinza suave
+      bars.append('rect')
+        .attr('x', 0)
+        .attr('y', d => y(String(d.level)) || 0)
+        .attr('width', width)
+        .attr('height', y.bandwidth())
+        .attr('rx', 4)
+        .attr('fill', 'currentColor')
+        .attr('opacity', 0.04);
 
-    // Barra Real
-    bars.append('rect')
-      .attr('x', 0)
-      .attr('y', d => y(String(d.level)) || 0)
-      .attr('width', 0)
-      .attr('height', y.bandwidth())
-      .attr('rx', 4)
-      .attr('fill', d => {
-        if (d.level === 1) return '#0A84FF'; // Piso
-        if (d.level <= 3) return '#6366F1'; // Níveis baixos
-        if (d.level <= 5) return '#8B5CF6'; // Níveis médios
-        return '#EC4899'; // Níveis altos (Topo)
-      })
-      .attr('opacity', 0.85)
-      .transition()
-      .duration(650)
-      .ease(d3.easeCubicOut)
-      .attr('width', d => x(d.pieces));
+      // Barra Real
+      bars.append('rect')
+        .attr('x', 0)
+        .attr('y', d => y(String(d.level)) || 0)
+        .attr('width', 0)
+        .attr('height', y.bandwidth())
+        .attr('rx', 4)
+        .attr('fill', d => {
+          if (d.level === 1) return '#0A84FF'; // Piso
+          if (d.level <= 3) return '#6366F1'; // Níveis baixos
+          if (d.level <= 5) return '#8B5CF6'; // Níveis médios
+          return '#EC4899'; // Níveis altos (Topo)
+        })
+        .attr('opacity', 0.85)
+        .transition()
+        .duration(650)
+        .ease(d3.easeCubicOut)
+        .attr('width', d => x(d.pieces));
 
-    // Rótulos de Texto com Quantidade de Peças
-    bars.append('text')
-      .attr('x', d => Math.max(8, x(d.pieces) + 6))
-      .attr('y', d => (y(String(d.level)) || 0) + y.bandwidth() / 2 + 3)
-      .attr('font-family', 'JetBrains Mono, monospace')
-      .attr('font-size', '9px')
-      .attr('font-weight', 'bold')
-      .attr('fill', 'currentColor')
-      .attr('opacity', 0.85)
-      .text(d => `${d.pieces.toLocaleString('pt-BR')} pçs`);
+      // Rótulos de Texto com Quantidade de Peças
+      bars.append('text')
+        .attr('x', d => Math.max(8, x(d.pieces) + 6))
+        .attr('y', d => (y(String(d.level)) || 0) + y.bandwidth() / 2 + 3)
+        .attr('font-family', 'JetBrains Mono, monospace')
+        .attr('font-size', '9px')
+        .attr('font-weight', 'bold')
+        .attr('fill', 'currentColor')
+        .attr('opacity', 0.85)
+        .text(d => `${d.pieces.toLocaleString('pt-BR')} pçs`);
 
-    bars
-      .on('mouseenter', function (event: MouseEvent, d: LevelStatItem) {
-        d3.select(this as SVGGElement)
-          .select('rect:nth-child(2)')
-          .attr('opacity', 1)
-          .attr('stroke', '#0A84FF')
-          .attr('stroke-width', 1.5);
-        onBarHover(d, event.clientX, event.clientY);
-      })
-      .on('mousemove', function (event: MouseEvent, d: LevelStatItem) {
-        onBarHover(d, event.clientX, event.clientY);
-      })
-      .on('mouseleave', function () {
-        d3.select(this as SVGGElement)
-          .select('rect:nth-child(2)')
-          .attr('opacity', 0.85)
-          .attr('stroke', 'none');
-        onBarHover(null);
-      });
+      bars
+        .on('mouseenter', function (event: MouseEvent, d: LevelStatItem) {
+          d3.select(this as SVGGElement)
+            .select('rect:nth-child(2)')
+            .attr('opacity', 1)
+            .attr('stroke', '#0A84FF')
+            .attr('stroke-width', 1.5);
+          onBarHover(d, event.clientX, event.clientY);
+        })
+        .on('mousemove', function (event: MouseEvent, d: LevelStatItem) {
+          onBarHover(d, event.clientX, event.clientY);
+        })
+        .on('mouseleave', function () {
+          d3.select(this as SVGGElement)
+            .select('rect:nth-child(2)')
+            .attr('opacity', 0.85)
+            .attr('stroke', 'none');
+          onBarHover(null);
+        });
+    } catch (err) {
+      console.error('LevelDensityBarChart render error:', err);
+    }
   }, [data, onBarHover]);
 
   return <svg ref={svgRef} className="mx-auto block select-none text-slate-800 dark:text-slate-100" />;

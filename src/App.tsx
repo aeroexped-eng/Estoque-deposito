@@ -46,6 +46,7 @@ import {
   triggerCsvDownload
 } from './utils/storageAndSync';
 import { ReportModal } from './components/ReportModal';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 type WmsPerspective = 'sku' | 'barra';
 type MapMode = 'cards' | 'rack';
@@ -5273,18 +5274,20 @@ export default function App() {
       {/* ==================================================================== */}
       {/* MODAL 7: D3 ANALYTICS REPORT MODAL                                   */}
       {/* ==================================================================== */}
-      <ReportModal
-        isOpen={showReportModal}
-        onClose={() => setShowReportModal(false)}
-        skus={skus}
-        barraItems={barraItems}
-        transbordoRegistry={transbordoRegistry}
-        wmsPerspective={wmsPerspective}
-        onSelectStreet={rua => {
-          setSelectedStreet(rua);
-          setSelectedRangeId('1-20');
-        }}
-      />
+      <ErrorBoundary fallbackTitle="Falha ao renderizar Relatório Executivo D3">
+        <ReportModal
+          isOpen={showReportModal}
+          onClose={() => setShowReportModal(false)}
+          skus={skus}
+          barraItems={barraItems}
+          transbordoRegistry={transbordoRegistry}
+          wmsPerspective={wmsPerspective}
+          onSelectStreet={rua => {
+            setSelectedStreet(rua);
+            setSelectedRangeId('1-20');
+          }}
+        />
+      </ErrorBoundary>
 
       {/* ==================================================================== */}
       {/* TOAST NOTIFICATION                                                   */}
