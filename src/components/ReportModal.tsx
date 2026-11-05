@@ -300,16 +300,16 @@ export const ReportModal: React.FC<ReportModalProps> = ({
   return (
     <div
       onClick={onClose}
-      className="fixed inset-0 bg-black/55 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-5 overflow-hidden"
+      className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-end sm:items-center justify-center p-0 sm:p-5 overflow-hidden"
     >
       <div
         onClick={e => e.stopPropagation()}
-        className="mac-window mac-sheet w-full max-w-6xl max-h-[92vh] rounded-2xl overflow-hidden shadow-2xl flex flex-col border border-white/20 bg-white/95 dark:bg-slate-900/95"
+        className="mac-window mac-sheet w-full max-w-6xl max-h-[92vh] sm:max-h-[90vh] rounded-t-3xl sm:rounded-2xl overflow-hidden shadow-2xl flex flex-col border border-white/20 bg-white/95 dark:bg-slate-900/95"
       >
         {/* Header no Estilo Janela macOS */}
         <div className="mac-menubar px-4 py-3 flex items-center justify-between border-b border-black/10 dark:border-white/10 shrink-0">
-          <div className="flex items-center space-x-2.5">
-            <div className="flex space-x-1.5 traffic-group">
+          <div className="flex items-center space-x-2.5 truncate mr-2">
+            <div className="flex space-x-1.5 traffic-group shrink-0">
               <button
                 type="button"
                 onClick={onClose}
@@ -328,32 +328,33 @@ export const ReportModal: React.FC<ReportModalProps> = ({
                 <span className="traffic-icon">🖨️</span>
               </button>
             </div>
-            <div className="ml-2">
-              <h2 className="font-display font-extrabold text-sm sm:text-base flex items-center gap-2">
-                <span>📊 Relatório Executivo de Ocupação & Tendências WMS</span>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-mac-blue/15 text-mac-blue font-bold border border-mac-blue/30">
-                  D3 Analytics
+            <div className="ml-1 truncate">
+              <h2 className="font-display font-extrabold text-xs sm:text-base flex items-center gap-1.5 truncate">
+                <span className="truncate">📊 Relatório WMS</span>
+                <span className="text-[10px] font-mono px-2 py-0.2 rounded-full bg-mac-blue/15 text-mac-blue font-bold border border-mac-blue/30 shrink-0">
+                  D3
                 </span>
               </h2>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                Análise em tempo real do armazém • Perspectiva: {wmsPerspective === 'barra' ? 'Caixas Físicas (Barra)' : 'Cadastro de SKUs'}
+              <p className="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                {wmsPerspective === 'barra' ? 'Caixas Físicas' : 'SKUs'}
               </p>
             </div>
           </div>
 
-          <div className="flex items-center space-x-2">
+          <div className="flex items-center space-x-1.5 shrink-0">
             <button
               type="button"
               onClick={handleExportCsv}
-              className="px-3 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-700 dark:text-emerald-300 font-bold text-xs flex items-center gap-1.5 transition"
+              className="px-2.5 sm:px-3 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-700 dark:text-emerald-300 font-bold text-xs flex items-center gap-1 transition"
               title="Baixar dados em planilha CSV"
             >
-              <span>📥 Exportar CSV</span>
+              <span>📥</span>
+              <span className="hidden sm:inline">Exportar CSV</span>
             </button>
             <button
               type="button"
               onClick={handlePrint}
-              className="px-3 py-1.5 rounded-lg bg-black/5 dark:bg-white/10 hover:bg-black/10 text-xs font-semibold flex items-center gap-1.5 transition hidden sm:flex"
+              className="px-3 py-1.5 rounded-lg bg-black/5 dark:bg-white/10 hover:bg-black/10 text-xs font-semibold items-center gap-1.5 transition hidden md:flex"
             >
               <span>🖨️ Imprimir</span>
             </button>
@@ -362,17 +363,17 @@ export const ReportModal: React.FC<ReportModalProps> = ({
               onClick={onClose}
               className="px-3 py-1.5 rounded-lg bg-mac-blue text-white text-xs font-bold shadow-sm"
             >
-              Concluído
+              ✕
             </button>
           </div>
         </div>
 
         {/* Executive KPI Summary Cards */}
-        <div className="px-5 py-3.5 bg-slate-50/70 dark:bg-slate-800/40 border-b border-black/5 dark:border-white/5 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 shrink-0">
-          <div className="p-2.5 rounded-xl bg-white dark:bg-slate-800/80 border border-black/5 dark:border-white/10 shadow-xs">
-            <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Taxa Ocupação</p>
+        <div className="px-3 sm:px-5 py-2.5 sm:py-3.5 bg-slate-50/70 dark:bg-slate-800/40 border-b border-black/5 dark:border-white/5 flex sm:grid sm:grid-cols-3 lg:grid-cols-6 gap-2 overflow-x-auto no-scrollbar shrink-0 pb-2">
+          <div className="p-2 sm:p-2.5 rounded-xl bg-white dark:bg-slate-800/80 border border-black/5 dark:border-white/10 shadow-xs shrink-0 w-32 sm:w-auto">
+            <p className="text-[9px] uppercase font-bold text-slate-400 tracking-wider">Ocupação</p>
             <div className="flex items-baseline gap-1 mt-0.5">
-              <span className={`text-xl font-extrabold font-mono ${
+              <span className={`text-lg sm:text-xl font-extrabold font-mono ${
                 globalSummary.globalRate > 90
                   ? 'text-rose-600 dark:text-rose-400'
                   : globalSummary.globalRate > 75
@@ -381,130 +382,116 @@ export const ReportModal: React.FC<ReportModalProps> = ({
               }`}>
                 {globalSummary.globalRate}%
               </span>
-              <span className="text-[10px] text-slate-400">geral</span>
-            </div>
-            <div className="w-full bg-slate-200 dark:bg-slate-700 h-1.5 rounded-full mt-1.5 overflow-hidden">
-              <div
-                className={`h-full rounded-full transition-all duration-500 ${
-                  globalSummary.globalRate > 90 ? 'bg-rose-500' : globalSummary.globalRate > 75 ? 'bg-amber-500' : 'bg-mac-blue'
-                }`}
-                style={{ width: `${Math.min(100, globalSummary.globalRate)}%` }}
-              />
+              <span className="text-[9px] text-slate-400">geral</span>
             </div>
           </div>
 
-          <div className="p-2.5 rounded-xl bg-white dark:bg-slate-800/80 border border-black/5 dark:border-white/10 shadow-xs">
-            <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Slots Ocupados</p>
+          <div className="p-2 sm:p-2.5 rounded-xl bg-white dark:bg-slate-800/80 border border-black/5 dark:border-white/10 shadow-xs shrink-0 w-32 sm:w-auto">
+            <p className="text-[9px] uppercase font-bold text-slate-400 tracking-wider">Slots Ocupados</p>
             <div className="flex items-baseline gap-1 mt-0.5">
-              <span className="text-xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400">
+              <span className="text-lg sm:text-xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400">
                 {globalSummary.totalOcc.toLocaleString('pt-BR')}
               </span>
-              <span className="text-[10px] text-slate-400">/ {globalSummary.totalCap.toLocaleString('pt-BR')}</span>
+              <span className="text-[9px] text-slate-400">/ {globalSummary.totalCap.toLocaleString('pt-BR')}</span>
             </div>
-            <p className="text-[9px] text-slate-400 mt-1">{globalSummary.totalFree.toLocaleString('pt-BR')} posições livres</p>
           </div>
 
-          <div className="p-2.5 rounded-xl bg-white dark:bg-slate-800/80 border border-black/5 dark:border-white/10 shadow-xs">
-            <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Peças Físicas</p>
+          <div className="p-2 sm:p-2.5 rounded-xl bg-white dark:bg-slate-800/80 border border-black/5 dark:border-white/10 shadow-xs shrink-0 w-32 sm:w-auto">
+            <p className="text-[9px] uppercase font-bold text-slate-400 tracking-wider">Peças Físicas</p>
             <div className="flex items-baseline gap-1 mt-0.5">
-              <span className="text-xl font-extrabold font-mono text-indigo-600 dark:text-indigo-400">
+              <span className="text-lg sm:text-xl font-extrabold font-mono text-indigo-600 dark:text-indigo-400">
                 {globalSummary.totalPieces.toLocaleString('pt-BR')}
               </span>
-              <span className="text-[10px] text-slate-400">pçs</span>
+              <span className="text-[9px] text-slate-400">pçs</span>
             </div>
-            <p className="text-[9px] text-slate-400 mt-1">em estoque ativo</p>
           </div>
 
-          <div className="p-2.5 rounded-xl bg-white dark:bg-slate-800/80 border border-black/5 dark:border-white/10 shadow-xs">
-            <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">SKUs Mapeados</p>
+          <div className="p-2 sm:p-2.5 rounded-xl bg-white dark:bg-slate-800/80 border border-black/5 dark:border-white/10 shadow-xs shrink-0 w-32 sm:w-auto">
+            <p className="text-[9px] uppercase font-bold text-slate-400 tracking-wider">SKUs Únicos</p>
             <div className="flex items-baseline gap-1 mt-0.5">
-              <span className="text-xl font-extrabold font-mono text-slate-800 dark:text-slate-100">
+              <span className="text-lg sm:text-xl font-extrabold font-mono text-slate-800 dark:text-slate-100">
                 {globalSummary.totalSkus.toLocaleString('pt-BR')}
               </span>
-              <span className="text-[10px] text-slate-400">códigos</span>
             </div>
-            <p className="text-[9px] text-slate-400 mt-1">referências únicas</p>
           </div>
 
-          <div className="p-2.5 rounded-xl bg-white dark:bg-slate-800/80 border border-black/5 dark:border-white/10 shadow-xs">
-            <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Transbordos</p>
+          <div className="p-2 sm:p-2.5 rounded-xl bg-white dark:bg-slate-800/80 border border-black/5 dark:border-white/10 shadow-xs shrink-0 w-32 sm:w-auto">
+            <p className="text-[9px] uppercase font-bold text-slate-400 tracking-wider">Transbordos</p>
             <div className="flex items-baseline gap-1 mt-0.5">
-              <span className="text-xl font-extrabold font-mono text-yellow-600 dark:text-yellow-400">
+              <span className="text-lg sm:text-xl font-extrabold font-mono text-yellow-600 dark:text-yellow-400">
                 {globalSummary.totalTrb}
               </span>
-              <span className="text-[10px] text-slate-400">colmeias</span>
+              <span className="text-[9px] text-slate-400">slots</span>
             </div>
-            <p className="text-[9px] text-slate-400 mt-1">mini pulmões bloqueados</p>
           </div>
 
-          <div className="p-2.5 rounded-xl bg-white dark:bg-slate-800/80 border border-black/5 dark:border-white/10 shadow-xs">
-            <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Coleções Ativas</p>
+          <div className="p-2 sm:p-2.5 rounded-xl bg-white dark:bg-slate-800/80 border border-black/5 dark:border-white/10 shadow-xs shrink-0 w-32 sm:w-auto">
+            <p className="text-[9px] uppercase font-bold text-slate-400 tracking-wider">Coleções</p>
             <div className="flex items-baseline gap-1 mt-0.5">
-              <span className="text-xl font-extrabold font-mono text-purple-600 dark:text-purple-400">
+              <span className="text-lg sm:text-xl font-extrabold font-mono text-purple-600 dark:text-purple-400">
                 {collectionStats.length}
               </span>
-              <span className="text-[10px] text-slate-400">grupos</span>
+              <span className="text-[9px] text-slate-400">ativas</span>
             </div>
-            <p className="text-[9px] text-slate-400 mt-1">35, 51 e especiais</p>
           </div>
         </div>
 
         {/* Tab Controls & Filters */}
-        <div className="px-5 py-2.5 bg-white/70 dark:bg-slate-900/70 border-b border-black/10 dark:border-white/10 flex flex-wrap items-center justify-between gap-3 shrink-0">
-          <div className="flex space-x-1 bg-black/5 dark:bg-white/10 p-1 rounded-xl text-xs font-semibold">
+        <div className="px-3 sm:px-5 py-2 bg-white/70 dark:bg-slate-900/70 border-b border-black/10 dark:border-white/10 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 shrink-0">
+          <div className="flex space-x-1 bg-black/5 dark:bg-white/10 p-1 rounded-xl text-xs font-semibold overflow-x-auto no-scrollbar flex-nowrap shrink-0 max-w-full">
             <button
               type="button"
               onClick={() => setActiveTab('charts')}
-              className={`px-3.5 py-1 rounded-lg transition flex items-center gap-1.5 ${
+              className={`px-3 py-1.5 rounded-lg transition flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
                 activeTab === 'charts'
                   ? 'bg-white dark:bg-slate-800 text-mac-blue shadow-xs font-bold'
-                  : 'text-slate-600 dark:text-slate-300 hover:text-slate-900'
+                  : 'text-slate-600 dark:text-slate-300'
               }`}
             >
-              <span>📈 Gráficos D3 (Ocupação & Coleções)</span>
+              <span>📈 Gráficos D3</span>
             </button>
             <button
               type="button"
               onClick={() => setActiveTab('table')}
-              className={`px-3.5 py-1 rounded-lg transition flex items-center gap-1.5 ${
+              className={`px-3 py-1.5 rounded-lg transition flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
                 activeTab === 'table'
                   ? 'bg-white dark:bg-slate-800 text-mac-blue shadow-xs font-bold'
-                  : 'text-slate-600 dark:text-slate-300 hover:text-slate-900'
+                  : 'text-slate-600 dark:text-slate-300'
               }`}
             >
-              <span>📋 Tabela Detalhada por Rua</span>
+              <span>📋 Tabela por Rua</span>
             </button>
             <button
               type="button"
               onClick={() => setActiveTab('collections')}
-              className={`px-3.5 py-1 rounded-lg transition flex items-center gap-1.5 ${
+              className={`px-3 py-1.5 rounded-lg transition flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
                 activeTab === 'collections'
                   ? 'bg-white dark:bg-slate-800 text-mac-blue shadow-xs font-bold'
-                  : 'text-slate-600 dark:text-slate-300 hover:text-slate-900'
+                  : 'text-slate-600 dark:text-slate-300'
               }`}
             >
-              <span>🏷️ Estoque por Coleção</span>
+              <span>🏷️ Coleções</span>
             </button>
           </div>
 
-          <div className="flex items-center space-x-1.5 text-xs">
-            <span className="text-slate-400 font-medium text-[11px]">Setor:</span>
+          <div className="flex items-center space-x-1 text-xs overflow-x-auto no-scrollbar flex-nowrap shrink-0 max-w-full pb-0.5">
+            <span className="text-slate-400 font-medium text-[10px] shrink-0">Setor:</span>
             {(
               [
-                { id: 'ALL', label: 'Todas as Ruas' },
-                { id: 'RACK', label: 'Porta-Paletes (RA–RH)' },
-                { id: 'ACCESSORIES', label: 'Acessórios (AA–AF)' },
-                { id: 'PULMAO', label: 'Pulmão (PA–PI)' }
+                { id: 'ALL', label: 'Todas' },
+                { id: 'RACK', label: 'Porta-Paletes' },
+                { id: 'ACCESSORIES', label: 'Acessórios' },
+                { id: 'PULMAO', label: 'Pulmão' }
               ] as const
             ).map(opt => (
               <button
                 key={opt.id}
                 type="button"
                 onClick={() => setStreetFilter(opt.id)}
-                className={`px-2.5 py-1 rounded-lg font-medium transition text-[11px] ${
+                className={`px-2 py-1 rounded-lg font-medium transition text-[10px] whitespace-nowrap shrink-0 ${
                   streetFilter === opt.id
                     ? 'bg-mac-blue text-white shadow-xs font-bold'
-                    : 'bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 text-slate-600 dark:text-slate-300'
+                    : 'bg-black/5 dark:bg-white/5 text-slate-600 dark:text-slate-300'
                 }`}
               >
                 {opt.label}

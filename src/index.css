@@ -66,6 +66,24 @@ html, body, #root {
   overflow-anchor: none !important;
 }
 
+/* Mobile touch ergonomics & safe-area insets */
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .pt-safe {
+    padding-top: env(safe-area-inset-top);
+  }
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
 .wallpaper-sequoia {
   background-color: #f3f5f9;
   background-image:

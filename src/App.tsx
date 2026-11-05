@@ -2340,7 +2340,7 @@ export default function App() {
           {!isFullscreen && (
             <div className="px-3.5 py-2 border-b border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/[0.02] shrink-0 space-y-1.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex flex-wrap items-center gap-1 bg-black/10 dark:bg-white/10 p-0.5 rounded-xl text-[11px]">
+                <div className="flex items-center gap-1 bg-black/10 dark:bg-white/10 p-0.5 rounded-xl text-[11px] overflow-x-auto no-scrollbar flex-nowrap shrink-0 max-w-full">
                   <button
                     type="button"
                     onClick={() => {
@@ -2349,7 +2349,7 @@ export default function App() {
                         selectStreet('RG');
                       }
                     }}
-                    className={`px-2.5 py-1 rounded-lg font-bold transition flex items-center gap-1 ${
+                    className={`px-2.5 py-1 rounded-lg font-bold transition flex items-center gap-1 whitespace-nowrap shrink-0 ${
                       macroSectorFilter === 'ruas_all'
                         ? 'bg-mac-blue text-white shadow'
                         : 'hover:bg-black/5 dark:hover:bg-white/10'
@@ -2364,7 +2364,7 @@ export default function App() {
                       setMacroSectorFilter('acessorios');
                       if (!isAccessoriesStreet(selectedStreet)) selectStreet('AA');
                     }}
-                    className={`px-2.5 py-1 rounded-lg font-bold transition flex items-center gap-1 ${
+                    className={`px-2.5 py-1 rounded-lg font-bold transition flex items-center gap-1 whitespace-nowrap shrink-0 ${
                       macroSectorFilter === 'acessorios'
                         ? 'bg-cyan-600 text-white shadow'
                         : 'hover:bg-black/5 dark:hover:bg-white/10 text-cyan-700 dark:text-cyan-300'
@@ -2379,7 +2379,7 @@ export default function App() {
                       setMacroSectorFilter('pulmao');
                       if (!isPulmaoStreet(selectedStreet)) selectStreet('PA');
                     }}
-                    className={`px-2.5 py-1 rounded-lg font-bold transition flex items-center gap-1 ${
+                    className={`px-2.5 py-1 rounded-lg font-bold transition flex items-center gap-1 whitespace-nowrap shrink-0 ${
                       macroSectorFilter === 'pulmao'
                         ? 'bg-indigo-600 text-white shadow'
                         : 'hover:bg-black/5 dark:hover:bg-white/10 text-indigo-700 dark:text-indigo-300'
@@ -2395,7 +2395,7 @@ export default function App() {
                 </span>
               </div>
 
-              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-8 lg:grid-cols-9 gap-1.5">
+              <div className="flex sm:grid sm:grid-cols-4 md:grid-cols-8 lg:grid-cols-9 gap-1.5 overflow-x-auto sm:overflow-visible no-scrollbar pb-1 sm:pb-0 touch-pan-x">
                 {visibleMacroStreets.map(rua => {
                   const st = streetStats.byStreet[rua];
                   const meta = STREET_META[rua];
@@ -2419,7 +2419,7 @@ export default function App() {
                         handleDropOnStreet(rua);
                       }}
                       title={meta.desc}
-                      className={`mac-card rounded-xl p-2 text-left transition flex flex-col justify-between ${
+                      className={`mac-card rounded-xl p-2 text-left transition flex flex-col justify-between shrink-0 w-24 sm:w-auto ${
                         dragOverKey === `STREET:${rua}` ? 'ring-2 ring-purple-500 scale-105' : ''
                       } ${
                         isSelected
@@ -2701,21 +2701,33 @@ export default function App() {
           {/* 3-COLUMN BODY (SIDEBAR + MAP CANVAS + INSPECTOR)                 */}
           {/* ================================================================ */}
           <div className="flex-1 flex overflow-hidden min-h-0 relative">
+            {/* Mobile Backdrop for Left Sidebar */}
+            {sidebarOpenMobile && (
+              <div
+                onClick={() => setSidebarOpenMobile(false)}
+                className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 lg:hidden"
+              />
+            )}
             {/* LEFT SIDEBAR */}
             <aside
-              className={`mac-sidebar w-64 shrink-0 flex flex-col justify-between p-3 overflow-y-auto select-none z-30 ${
-                sidebarOpenMobile ? 'fixed inset-y-0 left-0 shadow-2xl' : 'hidden lg:flex'
+              className={`mac-sidebar w-72 max-w-[85vw] shrink-0 flex flex-col justify-between p-3.5 overflow-y-auto select-none transition-all duration-200 z-50 ${
+                sidebarOpenMobile
+                  ? 'fixed inset-y-0 left-0 shadow-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-r border-black/15 dark:border-white/15'
+                  : 'hidden lg:flex'
               }`}
             >
               <div className="space-y-4">
-                <div className="flex items-center justify-between lg:hidden pb-1 border-b border-black/10 dark:border-white/10">
-                  <span className="font-display font-bold text-xs">Navegação e Filtros</span>
+                <div className="flex items-center justify-between lg:hidden pb-2 border-b border-black/10 dark:border-white/10">
+                  <span className="font-display font-bold text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                    Navegação e Filtros
+                  </span>
                   <button
                     type="button"
                     onClick={() => setSidebarOpenMobile(false)}
-                    className="px-2 py-0.5 rounded bg-black/10 dark:bg-white/10 text-xs"
+                    className="px-2.5 py-1 rounded-lg bg-black/10 dark:bg-white/10 hover:bg-rose-500 hover:text-white text-xs font-bold transition flex items-center gap-1"
                   >
-                    ✕
+                    <span>✕</span>
+                    <span>Fechar</span>
                   </button>
                 </div>
 
@@ -3012,7 +3024,7 @@ export default function App() {
               )}
 
               {/* Scrollable Map Grid */}
-              <div className="flex-1 overflow-y-auto p-3.5">
+              <div className="flex-1 overflow-y-auto p-3.5 pb-24 lg:pb-3.5">
                 {filteredViewData.slots.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center text-center p-8">
                     <div className="w-14 h-14 rounded-2xl bg-mac-blue/15 text-mac-blue flex items-center justify-center text-3xl mb-3">
@@ -3090,6 +3102,9 @@ export default function App() {
                             } else {
                               setSelectedAddressKey(slot.wms);
                               if (primary) setSelectedSkuId(primary.id);
+                              if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+                                setInspectorOpenMobile(true);
+                              }
                             }
                           }}
                           className={`mac-card rounded-2xl p-3 cursor-pointer flex flex-col justify-between min-h-[120px] relative ${
@@ -3373,6 +3388,9 @@ export default function App() {
                                                 } else {
                                                   setSelectedAddressKey(wms);
                                                   if (primary) setSelectedSkuId(primary.id);
+                                                  if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+                                                    setInspectorOpenMobile(true);
+                                                  }
                                                 }
                                               }}
                                               className={`h-16 rounded-xl p-1.5 flex flex-col justify-between cursor-pointer transition relative text-[10px] font-mono ${
@@ -3478,12 +3496,19 @@ export default function App() {
               </div>
             </section>
 
-            {/* ============================================================== */}
-            {/* RIGHT INSPECTOR PANEL                                          */}
-            {/* ============================================================== */}
+            {/* Mobile Backdrop for Right Inspector */}
+            {inspectorOpenMobile && (
+              <div
+                onClick={() => setInspectorOpenMobile(false)}
+                className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 lg:hidden"
+              />
+            )}
+            {/* RIGHT INSPECTOR PANEL */}
             <aside
-              className={`w-80 shrink-0 border-l border-black/10 dark:border-white/10 bg-white/45 dark:bg-black/25 p-3.5 overflow-y-auto flex flex-col justify-between z-30 ${
-                inspectorOpenMobile ? 'fixed inset-y-0 right-0 shadow-2xl' : 'hidden lg:flex'
+              className={`w-88 max-w-[92vw] shrink-0 border-l border-black/10 dark:border-white/10 p-3.5 overflow-y-auto flex flex-col justify-between transition-all duration-200 z-50 ${
+                inspectorOpenMobile
+                  ? 'fixed inset-y-0 right-0 shadow-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-l border-black/15 dark:border-white/15'
+                  : 'hidden lg:flex bg-white/45 dark:bg-black/25'
               }`}
             >
               <div className="space-y-4">
@@ -3498,9 +3523,10 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => setInspectorOpenMobile(false)}
-                      className="lg:hidden px-2 py-0.5 rounded bg-black/10 dark:bg-white/10 text-xs font-bold"
+                      className="lg:hidden px-2.5 py-1 rounded-lg bg-black/10 dark:bg-white/10 hover:bg-rose-500 hover:text-white text-xs font-bold transition flex items-center gap-1"
                     >
-                      ✕
+                      <span>✕</span>
+                      <span>Fechar</span>
                     </button>
                   </div>
                 </div>
@@ -4154,10 +4180,93 @@ export default function App() {
       </main>
 
       {/* ==================================================================== */}
-      {/* RETRACTABLE MACOS DOCK                                               */}
+      {/* MOBILE BOTTOM NAVIGATION BAR (TOUCH-OPTIMIZED, LG:HIDDEN)             */}
       {/* ==================================================================== */}
       {!isFullscreen && (
-        <div className="fixed bottom-1.5 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center pointer-events-none">
+        <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-t border-black/10 dark:border-white/10 px-2 py-1.5 pb-safe flex items-center justify-around shadow-2xl">
+          {/* Tab 1: Ruas e Filtros */}
+          <button
+            type="button"
+            onClick={() => {
+              setSidebarOpenMobile(s => !s);
+              setInspectorOpenMobile(false);
+            }}
+            className={`flex flex-col items-center justify-center min-w-[56px] min-h-[44px] py-1 px-2 rounded-xl transition ${
+              sidebarOpenMobile ? 'text-mac-blue font-bold bg-mac-blue/15' : 'text-slate-600 dark:text-slate-300'
+            }`}
+          >
+            <span className="text-lg">🗂️</span>
+            <span className="text-[10px] font-semibold mt-0.5 truncate max-w-[64px]">
+              Rua {selectedStreet}
+            </span>
+          </button>
+
+          {/* Tab 2: Modo de Visão (Cards vs Porta-Paletes) */}
+          <button
+            type="button"
+            onClick={() => setMapMode(m => m === 'cards' ? 'rack' : 'cards')}
+            className="flex flex-col items-center justify-center min-w-[56px] min-h-[44px] py-1 px-2 rounded-xl text-slate-600 dark:text-slate-300 hover:text-mac-blue transition"
+          >
+            <span className="text-lg">{mapMode === 'cards' ? '🏢' : '🃏'}</span>
+            <span className="text-[10px] font-semibold mt-0.5">
+              {mapMode === 'cards' ? 'P.-Paletes' : 'Cards'}
+            </span>
+          </button>
+
+          {/* Tab 3: Transbordo Mini Pulmão */}
+          <button
+            type="button"
+            onClick={() => setTransbordoSelectMode(t => !t)}
+            className={`flex flex-col items-center justify-center min-w-[56px] min-h-[44px] py-1 px-2 rounded-xl transition relative ${
+              transbordoSelectMode ? 'text-yellow-600 dark:text-yellow-300 font-bold bg-yellow-400/20' : 'text-slate-600 dark:text-slate-300'
+            }`}
+          >
+            <span className="text-lg">⚡</span>
+            <span className="text-[10px] font-semibold mt-0.5">Transbordo</span>
+            {transbordoCount > 0 && (
+              <span className="absolute top-1 right-2 w-4 h-4 rounded-full bg-yellow-400 text-slate-950 font-bold text-[9px] flex items-center justify-center shadow">
+                {transbordoCount}
+              </span>
+            )}
+          </button>
+
+          {/* Tab 4: Relatório D3 */}
+          <button
+            type="button"
+            onClick={() => setShowReportModal(true)}
+            className="flex flex-col items-center justify-center min-w-[56px] min-h-[44px] py-1 px-2 rounded-xl text-slate-600 dark:text-slate-300 hover:text-mac-blue transition"
+          >
+            <span className="text-lg">📊</span>
+            <span className="text-[10px] font-semibold mt-0.5">Relatório</span>
+          </button>
+
+          {/* Tab 5: Inspetor Lateral */}
+          <button
+            type="button"
+            onClick={() => {
+              setInspectorOpenMobile(i => !i);
+              setSidebarOpenMobile(false);
+            }}
+            className={`flex flex-col items-center justify-center min-w-[56px] min-h-[44px] py-1 px-2 rounded-xl transition relative ${
+              inspectorOpenMobile ? 'text-mac-blue font-bold bg-mac-blue/15' : 'text-slate-600 dark:text-slate-300'
+            }`}
+          >
+            <span className="text-lg">ℹ️</span>
+            <span className="text-[10px] font-semibold mt-0.5 truncate max-w-[64px]">
+              {inspectedSlot.parsed.wms.split('.')[1] || 'Inspetor'}
+            </span>
+            {inspectedSlot.items.length > 0 && (
+              <span className="absolute top-1 right-2 w-2 h-2 rounded-full bg-emerald-500" />
+            )}
+          </button>
+        </nav>
+      )}
+
+      {/* ==================================================================== */}
+      {/* RETRACTABLE MACOS DOCK (DESKTOP ONLY)                                */}
+      {/* ==================================================================== */}
+      {!isFullscreen && (
+        <div className="hidden lg:flex fixed bottom-1.5 left-1/2 -translate-x-1/2 z-40 flex-col items-center pointer-events-none">
           <button
             type="button"
             onClick={() => setIsDockCollapsed(c => !c)}
