@@ -1,0 +1,450 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-display: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  --color-mac-red: #FF5F56;
+  --color-mac-yellow: #FFBD2E;
+  --color-mac-green: #27C93F;
+  --color-mac-blue: #0A84FF;
+  --color-mac-indigo: #5E5CE6;
+  --color-mac-purple: #BF5AF2;
+  --color-mac-teal: #64D2FF;
+  --color-mac-orange: #FF9F0A;
+}
+
+:root {
+  --glass-bg: rgba(255, 255, 255, 0.94);
+  --glass-sidebar: rgba(248, 250, 252, 0.93);
+  --glass-border: rgba(0, 0, 0, 0.09);
+  --glass-highlight: rgba(255, 255, 255, 0.96);
+  --text-primary: #1D1D1F;
+  --text-secondary: #6E6E73;
+  --card-bg: rgba(255, 255, 255, 0.96);
+}
+
+html.dark {
+  --glass-bg: rgba(26, 28, 36, 0.82);
+  --glass-sidebar: rgba(18, 20, 28, 0.74);
+  --glass-border: rgba(255, 255, 255, 0.12);
+  --glass-highlight: rgba(255, 255, 255, 0.07);
+  --text-primary: #F5F5F7;
+  --text-secondary: #A1A1AA;
+  --card-bg: rgba(255, 255, 255, 0.045);
+}
+
+* {
+  box-sizing: border-box;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+input, textarea, select {
+  user-select: text;
+}
+
+/* Travamento absoluto da página/iframe para NUNCA ser jogada para cima no Google Sites */
+html, body, #root {
+  position: fixed !important;
+  inset: 0 !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  overflow: clip !important;
+  overscroll-behavior: none !important;
+  overflow-anchor: none !important;
+}
+
+.wallpaper-sequoia {
+  background-color: #f3f5f9;
+  background-image:
+    radial-gradient(at 12% 18%, rgba(56, 189, 248, 0.18) 0px, transparent 50%),
+    radial-gradient(at 85% 12%, rgba(99, 102, 241, 0.14) 0px, transparent 52%),
+    radial-gradient(at 75% 84%, rgba(232, 121, 249, 0.12) 0px, transparent 55%),
+    radial-gradient(at 50% 50%, rgba(255, 255, 255, 0.95) 0px, transparent 80%);
+  transition: background 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+html.dark .wallpaper-sequoia {
+  background-color: #0b0f19;
+  background-image:
+    radial-gradient(at 12% 18%, rgba(14, 116, 144, 0.48) 0px, transparent 50%),
+    radial-gradient(at 85% 12%, rgba(79, 70, 229, 0.45) 0px, transparent 52%),
+    radial-gradient(at 75% 84%, rgba(217, 70, 239, 0.32) 0px, transparent 55%),
+    radial-gradient(at 24% 82%, rgba(245, 158, 11, 0.25) 0px, transparent 50%),
+    radial-gradient(at 50% 50%, rgba(17, 24, 39, 0.9) 0px, transparent 80%);
+}
+
+.wallpaper-sonoma {
+  background-color: #091926;
+  background-image:
+    radial-gradient(at 15% 85%, rgba(6, 182, 212, 0.52) 0px, transparent 55%),
+    radial-gradient(at 80% 20%, rgba(16, 185, 129, 0.42) 0px, transparent 50%),
+    radial-gradient(at 50% 45%, rgba(30, 58, 138, 0.65) 0px, transparent 65%);
+}
+
+.wallpaper-ventura {
+  background-color: #1c1018;
+  background-image:
+    radial-gradient(at 20% 20%, rgba(249, 115, 22, 0.5) 0px, transparent 55%),
+    radial-gradient(at 82% 75%, rgba(225, 29, 72, 0.45) 0px, transparent 55%),
+    radial-gradient(at 48% 52%, rgba(88, 28, 135, 0.55) 0px, transparent 65%);
+}
+
+.mac-window {
+  background: var(--glass-bg);
+  backdrop-filter: blur(36px) saturate(190%);
+  -webkit-backdrop-filter: blur(36px) saturate(190%);
+  border: 1px solid var(--glass-border);
+  box-shadow:
+    0 30px 70px -15px rgba(0, 0, 0, 0.45),
+    0 0 0 0.5px rgba(255, 255, 255, 0.15) inset,
+    0 1px 0 0 var(--glass-highlight) inset;
+  transition: transform 0.24s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.22s ease;
+}
+
+.mac-sidebar {
+  background: var(--glass-sidebar);
+  backdrop-filter: blur(40px) saturate(180%);
+  border-right: 1px solid var(--glass-border);
+}
+
+.mac-card {
+  background: var(--card-bg);
+  border: 1px solid var(--glass-border);
+  transition: all 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.mac-card:hover {
+  border-color: rgba(10, 132, 255, 0.42);
+  transform: translateY(-1px);
+}
+
+.mac-menubar {
+  background: rgba(255, 255, 255, 0.74);
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+html.dark .mac-menubar {
+  background: rgba(15, 17, 23, 0.62);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.mac-dock {
+  background: rgba(245, 245, 250, 0.78);
+  backdrop-filter: blur(32px) saturate(200%);
+  -webkit-backdrop-filter: blur(32px) saturate(200%);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  box-shadow: 0 20px 45px rgba(0, 0, 0, 0.35), 0 1px 0 rgba(255, 255, 255, 0.18) inset;
+}
+
+html.dark .mac-dock {
+  background: rgba(25, 27, 36, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.dock-item {
+  transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), margin 0.2s ease;
+}
+
+.dock-item:hover {
+  transform: translateY(-7px) scale(1.15);
+  margin-left: 3px;
+  margin-right: 3px;
+}
+
+.traffic-group:hover .traffic-icon {
+  opacity: 1;
+}
+.traffic-icon {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0.32);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(156, 163, 175, 0.55);
+}
+
+@keyframes sheetSlideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-18px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.mac-sheet {
+  animation: sheetSlideDown 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Drag and Drop Visual Feedback */
+[draggable="true"] {
+  cursor: grab;
+}
+[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+/* Colmeias de Transbordo (Mini Pulmão dentro da Rua • Amarelo Vivo de Bloqueio Visual) */
+.transbordo-card {
+  background-color: rgba(250, 204, 21, 0.36) !important;
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(250, 204, 21, 0.24) 0px,
+    rgba(250, 204, 21, 0.24) 10px,
+    rgba(234, 179, 8, 0.06) 10px,
+    rgba(234, 179, 8, 0.06) 20px
+  ) !important;
+  border: 2px solid #EAB308 !important;
+  box-shadow: 0 4px 16px -2px rgba(234, 179, 8, 0.35), inset 0 0 0 1px rgba(254, 240, 138, 0.65) !important;
+}
+html.dark .transbordo-card {
+  background-color: rgba(234, 179, 8, 0.28) !important;
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(250, 204, 21, 0.22) 0px,
+    rgba(250, 204, 21, 0.22) 10px,
+    rgba(161, 98, 7, 0.10) 10px,
+    rgba(161, 98, 7, 0.10) 20px
+  ) !important;
+  border: 2px solid #FACC15 !important;
+  box-shadow: 0 4px 18px -2px rgba(250, 204, 21, 0.28), inset 0 0 0 1px rgba(250, 204, 21, 0.38) !important;
+}
+
+.transbordo-rack-cell {
+  background-color: rgba(250, 204, 21, 0.55) !important;
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(250, 204, 21, 0.35) 0px,
+    rgba(250, 204, 21, 0.35) 6px,
+    rgba(234, 179, 8, 0.12) 6px,
+    rgba(234, 179, 8, 0.12) 12px
+  ) !important;
+  border: 2px solid #EAB308 !important;
+  color: #422006 !important;
+  font-weight: 800 !important;
+}
+html.dark .transbordo-rack-cell {
+  background-color: rgba(234, 179, 8, 0.42) !important;
+  border: 2px solid #FACC15 !important;
+  color: #FEF08A !important;
+}
+
+.transbordo-selected-slot {
+  outline: 3px solid #FACC15 !important;
+  outline-offset: 1px;
+  background-color: rgba(250, 204, 21, 0.42) !important;
+  box-shadow: 0 0 0 4px rgba(250, 204, 21, 0.35) !important;
+  transform: scale(1.015);
+}
+
+/* Destaque Verde Vivo para Caixas/SKUs com Poucas Peças (< 5 peças • Fácil de Remanejar) */
+.low-stock-green-card {
+  background-color: rgba(16, 185, 129, 0.28) !important;
+  background-image: linear-gradient(135deg, rgba(16, 185, 129, 0.25) 0%, rgba(34, 197, 94, 0.12) 100%) !important;
+  border: 2px solid #10B981 !important;
+  box-shadow: 0 4px 16px -2px rgba(16, 185, 129, 0.35), inset 0 0 0 1px rgba(110, 231, 183, 0.5) !important;
+}
+html.dark .low-stock-green-card {
+  background-color: rgba(16, 185, 129, 0.26) !important;
+  background-image: linear-gradient(135deg, rgba(16, 185, 129, 0.28) 0%, rgba(5, 150, 105, 0.14) 100%) !important;
+  border: 2px solid #34D399 !important;
+  box-shadow: 0 4px 18px -2px rgba(52, 211, 153, 0.30), inset 0 0 0 1px rgba(52, 211, 153, 0.4) !important;
+}
+
+.low-stock-green-rack-cell {
+  background-color: rgba(16, 185, 129, 0.52) !important;
+  border: 2px solid #059669 !important;
+  color: #022C22 !important;
+  font-weight: 800 !important;
+}
+html.dark .low-stock-green-rack-cell {
+  background-color: rgba(16, 185, 129, 0.42) !important;
+  border: 2px solid #34D399 !important;
+  color: #D1FAE5 !important;
+}
+
+/* ========================================================
+   Animações Sutis de Fading Pulsante: Conflitos e Invasores
+   ======================================================== */
+
+@keyframes conflictPulseFading {
+  0%, 100% {
+    background-color: rgba(244, 63, 94, 0.10);
+    border-color: rgba(244, 63, 94, 0.70);
+    box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.20), inset 0 0 0 1px rgba(244, 63, 94, 0.15);
+  }
+  50% {
+    background-color: rgba(244, 63, 94, 0.28);
+    border-color: #E11D48;
+    box-shadow: 0 0 14px 2px rgba(244, 63, 94, 0.42), inset 0 0 0 1px rgba(254, 205, 211, 0.45);
+  }
+}
+
+@keyframes conflictPulseFadingDark {
+  0%, 100% {
+    background-color: rgba(244, 63, 94, 0.14);
+    border-color: rgba(251, 113, 133, 0.65);
+    box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.25);
+  }
+  50% {
+    background-color: rgba(244, 63, 94, 0.32);
+    border-color: #FB7185;
+    box-shadow: 0 0 16px 3px rgba(244, 63, 94, 0.50), inset 0 0 0 1px rgba(251, 113, 133, 0.35);
+  }
+}
+
+@keyframes invaderPulseFading {
+  0%, 100% {
+    background-color: rgba(245, 158, 11, 0.10);
+    border-color: rgba(245, 158, 11, 0.70);
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.20), inset 0 0 0 1px rgba(245, 158, 11, 0.15);
+  }
+  50% {
+    background-color: rgba(245, 158, 11, 0.28);
+    border-color: #D97706;
+    box-shadow: 0 0 14px 2px rgba(245, 158, 11, 0.42), inset 0 0 0 1px rgba(254, 240, 138, 0.45);
+  }
+}
+
+@keyframes invaderPulseFadingDark {
+  0%, 100% {
+    background-color: rgba(245, 158, 11, 0.14);
+    border-color: rgba(251, 191, 36, 0.65);
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.25);
+  }
+  50% {
+    background-color: rgba(245, 158, 11, 0.32);
+    border-color: #FBBF24;
+    box-shadow: 0 0 16px 3px rgba(245, 158, 11, 0.50), inset 0 0 0 1px rgba(251, 191, 36, 0.35);
+  }
+}
+
+@keyframes rackConflictPulseFading {
+  0%, 100% {
+    background-color: rgba(244, 63, 94, 0.16);
+    border-color: rgba(244, 63, 94, 0.75);
+    box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.20);
+  }
+  50% {
+    background-color: rgba(244, 63, 94, 0.36);
+    border-color: #E11D48;
+    box-shadow: 0 0 10px 2px rgba(244, 63, 94, 0.40);
+  }
+}
+
+@keyframes rackConflictPulseFadingDark {
+  0%, 100% {
+    background-color: rgba(244, 63, 94, 0.22);
+    border-color: rgba(251, 113, 133, 0.70);
+    box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.25);
+  }
+  50% {
+    background-color: rgba(244, 63, 94, 0.42);
+    border-color: #FB7185;
+    box-shadow: 0 0 12px 2px rgba(244, 63, 94, 0.50);
+  }
+}
+
+@keyframes rackInvaderPulseFading {
+  0%, 100% {
+    background-color: rgba(245, 158, 11, 0.16);
+    border-color: rgba(245, 158, 11, 0.75);
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.20);
+  }
+  50% {
+    background-color: rgba(245, 158, 11, 0.36);
+    border-color: #D97706;
+    box-shadow: 0 0 10px 2px rgba(245, 158, 11, 0.40);
+  }
+}
+
+@keyframes rackInvaderPulseFadingDark {
+  0%, 100% {
+    background-color: rgba(245, 158, 11, 0.22);
+    border-color: rgba(251, 191, 36, 0.70);
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.25);
+  }
+  50% {
+    background-color: rgba(245, 158, 11, 0.42);
+    border-color: #FBBF24;
+    box-shadow: 0 0 12px 2px rgba(245, 158, 11, 0.50);
+  }
+}
+
+.slot-conflict-pulse {
+  border: 2px solid #E11D48 !important;
+  animation: conflictPulseFading 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite !important;
+}
+html.dark .slot-conflict-pulse {
+  border: 2px solid #FB7185 !important;
+  animation: conflictPulseFadingDark 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite !important;
+}
+
+.slot-invader-pulse {
+  border: 2px solid #D97706 !important;
+  animation: invaderPulseFading 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite !important;
+}
+html.dark .slot-invader-pulse {
+  border: 2px solid #FBBF24 !important;
+  animation: invaderPulseFadingDark 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite !important;
+}
+
+.rack-conflict-pulse {
+  border: 2px solid #E11D48 !important;
+  color: #881337 !important;
+  animation: rackConflictPulseFading 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite !important;
+}
+html.dark .rack-conflict-pulse {
+  border: 2px solid #FB7185 !important;
+  color: #FFE4E6 !important;
+  animation: rackConflictPulseFadingDark 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite !important;
+}
+
+.rack-invader-pulse {
+  border: 2px solid #D97706 !important;
+  color: #78350F !important;
+  animation: rackInvaderPulseFading 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite !important;
+}
+html.dark .rack-invader-pulse {
+  border: 2px solid #FBBF24 !important;
+  color: #FEF3C7 !important;
+  animation: rackInvaderPulseFadingDark 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .slot-conflict-pulse,
+  .slot-invader-pulse,
+  .rack-conflict-pulse,
+  .rack-invader-pulse {
+    animation: none !important;
+  }
+}
+

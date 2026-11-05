@@ -1,0 +1,1019 @@
+import {
+  SkuItem,
+  TransbordoEntry,
+  MovedSkuEntry,
+  expandSisplanLocal,
+  formatCanonicalSkuDisplay,
+  decodeSkuPrefix,
+  isReservedCol35Street,
+  getCanonicalSkuKey,
+  formatLevelsToSisplanLocal,
+  formatWmsAddress
+} from '../constants/wmsConstants';
+
+export const EMBEDDED_CLOUD_SYNC_URL =
+  'https://script.google.com/macros/s/AKfycbxCE7MUpWPE4JyNbO6IRvL2yWGQlgZHYAcZiqRUf3Zr7XeGj0OXcPapqY1eSkXg-C1i/exec';
+
+export const EMBEDDED_TRANSBORDO_DATA: TransbordoEntry[] = [
+  {
+    wms: 'RH.049.1',
+    rua: 'RH',
+    pos: 49,
+    nivel: 1,
+    code: '11050001 - 201 - M',
+    deposito: '2',
+    note: 'Excedente > 6 colmeias (Mini Pulmão)',
+    createdAt: '2026-11-04T14:47:41.412Z'
+  },
+  {
+    wms: 'RH.049.2',
+    rua: 'RH',
+    pos: 49,
+    nivel: 2,
+    code: '11050001 - 201 - M',
+    deposito: '2',
+    note: 'Excedente > 6 colmeias (Mini Pulmão)',
+    createdAt: '2026-11-04T14:47:41.412Z'
+  },
+  {
+    wms: 'RH.049.3',
+    rua: 'RH',
+    pos: 49,
+    nivel: 3,
+    code: '11050001 - 201 - M',
+    deposito: '2',
+    note: 'Excedente > 6 colmeias (Mini Pulmão)',
+    createdAt: '2026-11-04T14:47:41.412Z'
+  }
+];
+
+export const SAMPLE_CSV_DATA = [
+  'CODIGO;COR;TAMANHO;DEPOSITO;LOCAL',
+  '11060127;102;M;2;RF.001.1 - 4',
+  '11040102;409;38;2;RF.001.5',
+  '11040047;409;44;2;RF.001.6',
+  '13060127;109;12;2;RF.002.5',
+  '12140004;109;GG;2;RF.002.6',
+  '11040047;409;40;2;RF.003.1',
+  '11210015;408;M;2;RF.003.2|4|6',
+  '11040047;409;42;2;RF.003.3',
+  '11060600;409;GG;2;RF.003.5',
+  '11050070;209;GG;2;RF.004.1',
+  '11060128;101;G;2;RG.001.1 - 3',
+  '11080045;405;M;2;RG.002.1 - 2',
+  '12030110;703;P;2;RG.003.1',
+  '11010088;203;42;2;RH.001.1 - 2',
+  '11050001;201;M;2-TRANSBORDO;RH.049.1 - 3'
+].join('\n');
+
+export const EMBEDDED_SISPLAN_CSV = SAMPLE_CSV_DATA;
+
+const STORAGE_KEY = 'estoque_os_sequoia_wms_v8_react';
+const CLOUD_URL_STORAGE_KEY = 'estoque_os_cloud_sync_url_v1';
+const IDB_NAME = 'EstoqueOS_Sequoia_WMS_DB';
+const IDB_STORE = 'wms_state_store';
+const IDB_RECORD_KEY = 'active_wms_snapshot';
+
+let audioCtx: AudioContext | null = null;
+export function playMacSound(type: 'pop' | 'success' | 'alert' = 'pop', enabled = true) {
+  if (!enabled) return;
+  try {
+    if (!audioCtx) {
+      const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      audioCtx = new AudioContextClass();
+    }
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    const now = audioCtx.currentTime;
+
+    if (type === 'pop') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(520, now);
+      osc.frequency.exponentialRampToValueAtTime(760, now + 0.055);
+      gain.gain.setValueAtTime(0.05, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.065);
+      osc.start(now);
+      osc.stop(now + 0.07);
+    } else if (type === 'success') {
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(523.25, now);
+      osc.frequency.setValueAtTime(659.25, now + 0.07);
+      osc.frequency.setValueAtTime(783.99, now + 0.14);
+      gain.gain.setValueAtTime(0.07, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+      osc.start(now);
+      osc.stop(now + 0.29);
+    } else if (type === 'alert') {
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(220, now);
+      osc.frequency.setValueAtTime(175, now + 0.09);
+      gain.gain.setValueAtTime(0.06, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+      osc.start(now);
+      osc.stop(now + 0.23);
+    }
+  } catch {
+    // Ignore audio context errors when user hasn't interacted yet
+  }
+}
+
+export interface ParsedCsvResult {
+  skus: SkuItem[];
+  barraItems: SkuItem[];
+  transbordoRegistry: Record<string, TransbordoEntry>;
+  importedCount: number;
+  importedBarraCount: number;
+  importedTransbordoCount: number;
+  firstRua: string | null;
+  firstWms: string | null;
+  firstId: string | null;
+}
+
+export function parseCsvData(
+  rawText: string,
+  existingSkus: SkuItem[] = [],
+  existingBarraItems: SkuItem[] = [],
+  existingTransbordo: Record<string, TransbordoEntry> = {},
+  mode: 'merge' | 'replace' = 'merge'
+): ParsedCsvResult {
+  const normalizedRawText = String(rawText || '')
+    .replace(/p\uFFFD+s/gi, 'pçs')
+    .replace(/p\x87s/gi, 'pçs');
+
+  const lines = normalizedRawText
+    .split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(l => l.length > 0 && !l.startsWith('<!DOCTYPE') && !l.startsWith('<html'));
+
+  const nextTransbordo: Record<string, TransbordoEntry> =
+    mode === 'replace' ? {} : { ...existingTransbordo };
+
+  if (lines.length === 0) {
+    return {
+      skus: existingSkus,
+      barraItems: existingBarraItems,
+      transbordoRegistry: nextTransbordo,
+      importedCount: 0,
+      importedBarraCount: 0,
+      importedTransbordoCount: 0,
+      firstRua: null,
+      firstWms: null,
+      firstId: null
+    };
+  }
+
+  const firstLine = lines[0];
+  const delimiter = firstLine.includes(';') ? ';' : firstLine.includes('\t') ? '\t' : ',';
+  const splitRow = (rowStr: string) =>
+    rowStr.split(delimiter).map(c => c.trim().replace(/^"|"$/g, ''));
+
+  const firstCols = splitRow(firstLine).map(c =>
+    c.toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  );
+
+  const hasHeader = firstCols.some(c =>
+    [
+      'CODIGO',
+      'SKU',
+      'COR',
+      'TAMANHO',
+      'DEPOSITO',
+      'LOCAL',
+      'LOCAL CADASTRO',
+      'LOCAL ATUAL',
+      'COLMEIA_TRANSBORDO',
+      'TIPO',
+      'RUA',
+      'ENDERECO',
+      'WMS'
+    ].includes(c)
+  );
+
+  // Formato exclusivo legado COLMEIA_TRANSBORDO
+  const isLegacyTransbordoCsv =
+    hasHeader && firstCols.includes('COLMEIA_TRANSBORDO') && firstCols.includes('SKU');
+
+  if (isLegacyTransbordoCsv) {
+    const wmsIdx = firstCols.indexOf('COLMEIA_TRANSBORDO');
+    const skuIdx = firstCols.indexOf('SKU');
+    const obsIdx = firstCols.indexOf('OBSERVACAO');
+    let trbImported = 0;
+    let firstRua: string | null = null;
+    let firstWms: string | null = null;
+
+    for (let i = 1; i < lines.length; i++) {
+      const cols = splitRow(lines[i]);
+      if (cols.length < 2) continue;
+      const rawWms = cols[wmsIdx] || '';
+      const rawSku = cols[skuIdx] || '';
+      const note =
+        obsIdx !== -1 && cols[obsIdx]
+          ? cols[obsIdx]
+          : 'Excedente > 6 colmeias (Mini Pulmão)';
+      const expanded = expandSisplanLocal(rawWms);
+      const fullSku = formatCanonicalSkuDisplay(rawSku);
+      if (!fullSku || expanded.length === 0) continue;
+      for (const loc of expanded) {
+        nextTransbordo[loc.wms] = {
+          wms: loc.wms,
+          rua: loc.rua,
+          pos: loc.pos,
+          nivel: loc.nivel,
+          code: fullSku,
+          deposito: '2',
+          note,
+          createdAt: new Date().toISOString()
+        };
+        if (!firstWms) {
+          firstRua = loc.rua;
+          firstWms = loc.wms;
+        }
+        trbImported++;
+      }
+    }
+
+    return {
+      skus: existingSkus,
+      barraItems: existingBarraItems,
+      transbordoRegistry: nextTransbordo,
+      importedCount: 0,
+      importedBarraCount: 0,
+      importedTransbordoCount: trbImported,
+      firstRua,
+      firstWms,
+      firstId: null
+    };
+  }
+
+  let idxCodigo = 0;
+  let idxCor = 1;
+  let idxTam = 2;
+  let idxDep = 3;
+  let idxLocal = 4;
+  let idxLocalAtual = -1;
+  let idxLocaisBarras = -1;
+  let idxColecao = -1;
+  let idxQtd = -1;
+  let idxTipo = -1;
+  let idxObs = -1;
+  let isEightColFormat = false;
+
+  if (hasHeader) {
+    const findCol = (names: string[]) => firstCols.findIndex(c => names.includes(c));
+    const cCod = findCol(['CODIGO', 'SKU', 'PRODUTO', 'REF']);
+    const cCor = findCol(['COR', 'COD COR', 'COLOR']);
+    const cTam = findCol(['TAMANHO', 'TAM', 'SIZE']);
+    const cDep = findCol(['DEPOSITO', 'DEP']);
+    const cLocCad = findCol(['LOCAL CADASTRO', 'LOCAL_CADASTRO', 'LOCAL CADA', 'LOCAL CADA:', 'LOCAL SKUS', 'LOCAL SKU']);
+    const cLocBarras = findCol(['LOCAIS_BARRAS', 'LOCAIS BARRAS', 'LOCAIS_BARRA', 'LOCAIS BARRA', 'LOCAIS BARRAS (PÇS)']);
+    const cLocAtual = findCol(['LOCAL ATUAL', 'LOCAL_ATUAL', 'LOCAL BARRA', 'CAIXA ATUAL']);
+    const cLoc = findCol(['LOCAL', 'ENDERECO', 'WMS']);
+    const cCol = findCol(['COLECAO', 'COL', 'COLEÇÃO']);
+    const cQtd = findCol(['TOTAL_PECAS', 'TOTAL PECAS', 'TOTAL_PECA', 'TOTAL_PEÇAS', 'QTD', 'QUANTIDADE', 'PECAS', 'SALDO', 'QTY']);
+    const cTipo = findCol(['TIPO', 'MODALIDADE', 'STATUS_COLMEIA']);
+    const cObs = findCol(['OBSERVACAO', 'OBS', 'NOTA']);
+
+    if (cCod !== -1) idxCodigo = cCod;
+    if (cCor !== -1) idxCor = cCor;
+    if (cTam !== -1) idxTam = cTam;
+    if (cDep !== -1) idxDep = cDep;
+    if (cTipo !== -1) idxTipo = cTipo;
+    if (cObs !== -1) idxObs = cObs;
+    if (cCol !== -1) idxColecao = cCol;
+    if (cLocBarras !== -1) idxLocaisBarras = cLocBarras;
+
+    if (cLocCad !== -1 || cLocBarras !== -1 || cLocAtual !== -1) {
+      isEightColFormat = true;
+      idxLocal = cLocCad !== -1 ? cLocCad : cLoc !== -1 ? cLoc : 2;
+      idxLocalAtual = cLocAtual !== -1 ? cLocAtual : idxLocal;
+      idxQtd = cQtd !== -1 ? cQtd : -1;
+    } else if (cLoc !== -1) {
+      idxLocal = cLoc;
+      if (cQtd !== -1) idxQtd = cQtd;
+    }
+  } else {
+    const sampleCols = splitRow(lines[0]);
+    if (
+      sampleCols.length >= 8 &&
+      /^[RAP][A-I]|^A[A-F]/i.test(sampleCols[0]) &&
+      /^\d+$/.test(sampleCols[1])
+    ) {
+      isEightColFormat = true;
+      idxLocal = 2;
+      idxLocalAtual = 3;
+      idxCodigo = 4;
+      idxCor = 5;
+      idxTam = 6;
+      idxQtd = 7;
+      idxDep = -1;
+    }
+  }
+
+  const startIdx = hasHeader ? 1 : 0;
+  const importedItems: SkuItem[] = [];
+  const importedBarraItems: SkuItem[] = [];
+  let importedTransbordoCount = 0;
+
+  for (let i = startIdx; i < lines.length; i++) {
+    const cols = splitRow(lines[i]);
+    if (cols.length < 2) continue;
+
+    let rawCodigo = '';
+    let rawCor = '';
+    let rawTam = '';
+    let rawDep = '2';
+    let rawColecao = '';
+    let rawLocal = '';
+    let rawLocalAtual = '';
+    let rawLocaisBarras = '';
+    let parsedQty = 1;
+
+    if (isEightColFormat) {
+      rawCodigo = cols[idxCodigo] || '';
+      rawCor = cols[idxCor] || '';
+      rawTam = cols[idxTam] || '';
+      rawLocal = cols[idxLocal] || '';
+      rawDep = idxDep !== -1 && cols[idxDep] ? cols[idxDep] : '2';
+      rawColecao = idxColecao !== -1 && cols[idxColecao] ? cols[idxColecao] : '';
+      rawLocaisBarras = idxLocaisBarras !== -1 && cols[idxLocaisBarras] ? cols[idxLocaisBarras] : '';
+      rawLocalAtual = idxLocalAtual !== -1 && cols[idxLocalAtual] ? cols[idxLocalAtual] : rawLocaisBarras || rawLocal;
+      const rawQtyStr = idxQtd !== -1 && cols[idxQtd] ? cols[idxQtd] : '1';
+      parsedQty = Math.max(
+        1,
+        parseInt(String(rawQtyStr).replace(/\D/g, ''), 10) || 1
+      );
+    } else if (cols.length >= 5) {
+      rawCodigo = cols[idxCodigo] || cols[0];
+      rawCor = cols[idxCor] || cols[1];
+      rawTam = cols[idxTam] || cols[2];
+      rawDep = cols[idxDep] || cols[3] || '2';
+      rawLocal = cols[idxLocal] || cols[4];
+      rawLocalAtual = rawLocal;
+      if (idxQtd !== -1 && cols[idxQtd]) {
+        parsedQty = Math.max(
+          1,
+          parseInt(String(cols[idxQtd]).replace(/\D/g, ''), 10) || 1
+        );
+      }
+    } else {
+      rawCodigo = cols[0];
+      rawLocal = cols[cols.length - 1];
+      rawLocalAtual = rawLocal;
+    }
+
+    const rowTipo = idxTipo !== -1 && cols[idxTipo] ? cols[idxTipo].toUpperCase() : '';
+    const rowObs = idxObs !== -1 && cols[idxObs] ? cols[idxObs] : '';
+    const isTransbordoRow =
+      String(rawDep).toUpperCase().includes('TRANSBORDO') ||
+      rowTipo.includes('TRANSBORDO') ||
+      String(rawLocal).toUpperCase().includes('TRANSBORDO');
+
+    if (isTransbordoRow) {
+      const cleanLocalStr = String(rawLocal)
+        .replace(/\(?\s*TRANSBORDO\s*\)?/gi, '')
+        .trim();
+      const trbAddresses = expandSisplanLocal(cleanLocalStr);
+      const decTrb = decodeSkuPrefix(rawCodigo, rawCor, rawTam);
+      const fullCodeTrb =
+        rawCor && rawTam
+          ? `${rawCodigo} - ${decTrb.colorCode} - ${decTrb.size}`
+          : formatCanonicalSkuDisplay(rawCodigo);
+
+      for (const addr of trbAddresses) {
+        nextTransbordo[addr.wms] = {
+          wms: addr.wms,
+          rua: addr.rua,
+          pos: addr.pos,
+          nivel: addr.nivel,
+          code: fullCodeTrb,
+          deposito: String(rawDep).replace(/-?TRANSBORDO/gi, '').trim() || '2',
+          note: rowObs || 'Excedente > 6 colmeias (Mini Pulmão)',
+          createdAt: new Date().toISOString()
+        };
+        importedTransbordoCount++;
+      }
+      continue;
+    }
+
+    let cleanLocalCadastro = String(rawLocal || '').trim();
+    let qtdForaFromParen = 0;
+    const parenMatch = cleanLocalCadastro.match(
+      /^([A-Z]{2}\.\d{1,3}\.[^\(\)]+?)\s*\(\s*(\d+)\s*p(?:ç|c|\uFFFD+)?s?\s*\)/i
+    );
+    if (parenMatch) {
+      cleanLocalCadastro = parenMatch[1].trim();
+      qtdForaFromParen = parseInt(parenMatch[2], 10) || parsedQty;
+    }
+
+    const dec = decodeSkuPrefix(rawCodigo, rawCor, rawTam);
+    const fullCode =
+      rawCor && rawTam ? `${rawCodigo} - ${dec.colorCode} - ${dec.size}` : rawCodigo;
+
+    const expandedCadastro = expandSisplanLocal(cleanLocalCadastro);
+
+    // Mapeia quantidades individuais por endereço a partir de Locais_Barras
+    // Exemplo: "RF.029.6 (46 pçs) | RF.029.3 (40 pçs) | RF.029.1 (39 pçs) | RF.029.2 (49 pçs) | Sem Local (6 pçs) | RF."
+    const slotQtyFromLocaisBarras = new Map<string, number>();
+    const parsedSubBoxes: { wms: string; rua: string; pos: number; nivel: number; qty: number; raw: string }[] = [];
+
+    if (rawLocaisBarras) {
+      const subLocations = rawLocaisBarras.split(/\s*\|\s*/).map(s => s.trim()).filter(Boolean);
+
+      for (const sub of subLocations) {
+        if (/sem\s*local/i.test(sub)) continue;
+
+        // Extrai endereço WMS e quantidade com suporte amplo a acentuações e formatos:
+        // ex: "RF.029.6 (46 pçs)", "RF.029.6 (46pcs)", "RF.029.6(46)", "RF.029.6 46 pçs"
+        const addrMatch = sub.match(/(?:^|\b)([RAP][A-I]|A[A-F])[\.\-\s](\d{1,3})[\.\-\s](\d{1,2})/i);
+        if (!addrMatch) continue;
+
+        const rua = addrMatch[1].toUpperCase();
+        const pos = parseInt(addrMatch[2], 10);
+        const nivel = parseInt(addrMatch[3], 10);
+        const wmsKey = formatWmsAddress(rua, pos, nivel);
+
+        let boxQty = 1;
+        const qtyMatch = sub.match(/\(?\s*(\d+)\s*(?:p(?:ç|c|\uFFFD+)?s?|pecas|peças|un|vol)?\s*\)?$/i) ||
+                         sub.match(/\(\s*(\d+)\s*(?:p(?:ç|c|\uFFFD+)?s?|pecas|peças|un|vol)?\s*\)/i);
+        if (qtyMatch) {
+          boxQty = parseInt(qtyMatch[1], 10) || 1;
+        }
+
+        slotQtyFromLocaisBarras.set(wmsKey, (slotQtyFromLocaisBarras.get(wmsKey) || 0) + boxQty);
+        parsedSubBoxes.push({ wms: wmsKey, rua, pos, nivel, qty: boxQty, raw: sub });
+      }
+    }
+
+    // 1. Processa Local Cadastro para a Aba SKU
+    if (expandedCadastro.length > 0) {
+      for (const addr of expandedCadastro) {
+        const autoCol = rawColecao || (isReservedCol35Street(addr.rua) ? '35' : '51');
+        // Se houver quantidade específica para este nível em Locais_Barras, usa-a;
+        // Se Locais_Barras foi preenchido na linha mas não contém este nível, a quantidade física é 0
+        const itemLevelQty = slotQtyFromLocaisBarras.has(addr.wms)
+          ? slotQtyFromLocaisBarras.get(addr.wms)!
+          : (slotQtyFromLocaisBarras.size > 0 ? 0 : parsedQty);
+
+        importedItems.push({
+          id: `csv-sku-${Date.now()}-${i}-${addr.nivel}-${Math.random().toString(36).slice(2, 6)}`,
+          code: fullCode,
+          codigoBase: rawCodigo,
+          name: dec.autoName,
+          brand: dec.marca,
+          label: dec.etiqueta,
+          groupCode: dec.dGrupo,
+          groupName: dec.grupo,
+          colorCode: dec.colorCode,
+          colorName: dec.colorName,
+          colorHex: dec.colorHex,
+          size: dec.size,
+          deposito: String(rawDep || '2'),
+          rua: addr.rua,
+          pos: addr.pos,
+          nivel: addr.nivel,
+          wms: addr.wms,
+          rawLocal: cleanLocalCadastro,
+          localCadastroRaw: cleanLocalCadastro,
+          localAtualRaw: rawLocaisBarras || rawLocalAtual || cleanLocalCadastro,
+          qtdForaDoLocal: qtdForaFromParen,
+          colecao: autoCol,
+          qty: itemLevelQty,
+          icon: dec.icon
+        });
+      }
+    }
+
+    // 2. Processa Locais_Barras para a Aba Barra (Local Atual Físico com Qtd de Peças Exata por Caixa)
+    const cadSet = new Set(expandedCadastro.map(a => a.wms));
+
+    if (parsedSubBoxes.length > 0) {
+      for (const box of parsedSubBoxes) {
+        const isOutside = expandedCadastro.length > 0 && !cadSet.has(box.wms);
+        const autoCol = rawColecao || (isReservedCol35Street(box.rua) ? '35' : '51');
+
+        importedBarraItems.push({
+          id: `csv-bar-${Date.now()}-${i}-${box.wms}-${Math.random().toString(36).slice(2, 6)}`,
+          code: fullCode,
+          codigoBase: rawCodigo,
+          name: dec.autoName,
+          brand: dec.marca,
+          label: dec.etiqueta,
+          groupCode: dec.dGrupo,
+          groupName: dec.grupo,
+          colorCode: dec.colorCode,
+          colorName: dec.colorName,
+          colorHex: dec.colorHex,
+          size: dec.size,
+          deposito: String(rawDep || '2'),
+          rua: box.rua,
+          pos: box.pos,
+          nivel: box.nivel,
+          wms: box.wms,
+          rawLocal: box.raw,
+          localCadastroRaw: cleanLocalCadastro,
+          localAtualRaw: box.raw,
+          isOutsideRegisteredLocal: isOutside,
+          qtdForaDoLocal: isOutside ? box.qty : 0,
+          colecao: autoCol,
+          qty: box.qty,
+          icon: dec.icon
+        });
+      }
+    } else {
+      // Fallback para arquivos CSV normais onde não há coluna Locais_Barras explícita
+      const targetBarraAddrs = expandSisplanLocal(rawLocalAtual);
+      const addrsToUse = targetBarraAddrs.length > 0 ? targetBarraAddrs : expandedCadastro;
+
+      if (addrsToUse.length > 0) {
+        for (const addr of addrsToUse) {
+          const isOutsideCadastro = expandedCadastro.length > 0 && !cadSet.has(addr.wms);
+          const autoCol = rawColecao || (isReservedCol35Street(addr.rua) ? '35' : '51');
+          importedBarraItems.push({
+            id: `csv-bar-${Date.now()}-${i}-${addr.nivel}-${Math.random().toString(36).slice(2, 6)}`,
+            code: fullCode,
+            codigoBase: rawCodigo,
+            name: dec.autoName,
+            brand: dec.marca,
+            label: dec.etiqueta,
+            groupCode: dec.dGrupo,
+            groupName: dec.grupo,
+            colorCode: dec.colorCode,
+            colorName: dec.colorName,
+            colorHex: dec.colorHex,
+            size: dec.size,
+            deposito: String(rawDep || '2'),
+            rua: addr.rua,
+            pos: addr.pos,
+            nivel: addr.nivel,
+            wms: addr.wms,
+            rawLocal: rawLocalAtual || cleanLocalCadastro,
+            localCadastroRaw: cleanLocalCadastro || rawLocalAtual,
+            localAtualRaw: rawLocalAtual || cleanLocalCadastro,
+            isOutsideRegisteredLocal: isOutsideCadastro,
+            qtdForaDoLocal: isOutsideCadastro ? qtdForaFromParen || parsedQty : 0,
+            colecao: autoCol,
+            qty: parsedQty,
+            icon: dec.icon
+          });
+        }
+      }
+    }
+  }
+
+  let finalSkus: SkuItem[] = [];
+  if (mode === 'replace') {
+    const dedupSkuMap = new Map<string, SkuItem>();
+    for (const item of importedItems) {
+      const key = `${getCanonicalSkuKey(item.code)}@@${item.wms}`;
+      const existing = dedupSkuMap.get(key);
+      if (existing) {
+        existing.qty = (existing.qty || 0) + (typeof item.qty === 'number' ? item.qty : 0);
+      } else {
+        dedupSkuMap.set(key, { ...item });
+      }
+    }
+    finalSkus = Array.from(dedupSkuMap.values());
+  } else {
+    const mergedMap = new Map<string, SkuItem>();
+    for (const existing of existingSkus) {
+      mergedMap.set(`${getCanonicalSkuKey(existing.code)}@@${existing.wms}`, existing);
+    }
+    for (const item of importedItems) {
+      mergedMap.set(`${getCanonicalSkuKey(item.code)}@@${item.wms}`, item);
+    }
+    finalSkus = Array.from(mergedMap.values());
+  }
+
+  let finalBarra: SkuItem[] = [];
+  if (mode === 'replace') {
+    const dedupBarraMap = new Map<string, SkuItem>();
+    for (const bItem of importedBarraItems) {
+      const key = `${getCanonicalSkuKey(bItem.code)}@@${bItem.wms}`;
+      const existing = dedupBarraMap.get(key);
+      if (existing) {
+        existing.qty = (existing.qty || 0) + (typeof bItem.qty === 'number' ? bItem.qty : 0);
+      } else {
+        dedupBarraMap.set(key, { ...bItem });
+      }
+    }
+    finalBarra = Array.from(dedupBarraMap.values());
+  } else {
+    const barraMap = new Map<string, SkuItem>();
+    for (const existing of existingBarraItems) {
+      barraMap.set(`${getCanonicalSkuKey(existing.code)}@@${existing.wms}`, { ...existing });
+    }
+    for (const bItem of importedBarraItems) {
+      const key = `${getCanonicalSkuKey(bItem.code)}@@${bItem.wms}`;
+      const prev = barraMap.get(key);
+      if (prev) {
+        prev.qty = bItem.qty;
+        prev.localCadastroRaw = bItem.localCadastroRaw;
+        prev.isOutsideRegisteredLocal = bItem.isOutsideRegisteredLocal;
+      } else {
+        barraMap.set(key, { ...bItem });
+      }
+    }
+    finalBarra = Array.from(barraMap.values());
+  }
+
+  const first = importedItems[0] || importedBarraItems[0] || null;
+  return {
+    skus: finalSkus,
+    barraItems: finalBarra,
+    transbordoRegistry: nextTransbordo,
+    importedCount: importedItems.length,
+    importedBarraCount: importedBarraItems.length,
+    importedTransbordoCount,
+    firstRua: first ? first.rua : null,
+    firstWms: first ? first.wms : null,
+    firstId: first ? first.id : null
+  };
+}
+
+export function buildSisplanCsvString(
+  skus: SkuItem[],
+  transbordoRegistry: Record<string, TransbordoEntry>
+): string {
+  const lines = ['CODIGO;COR;TAMANHO;DEPOSITO;LOCAL'];
+  const grouped = new Map<
+    string,
+    { codigo: string; cor: string; tam: string; dep: string; rua: string; pos: number; levels: number[] }
+  >();
+
+  for (const s of skus) {
+    if (s.isTransbordo) continue;
+    const dec = decodeSkuPrefix(s.code);
+    const codigo = s.codigoBase || dec.dMarca + dec.dEtiqueta + dec.dGrupo + dec.modelSeq;
+    const cor = s.colorCode || dec.colorCode;
+    const tam = s.size || dec.size;
+    const dep = s.deposito || '2';
+    const key = `${codigo}|${cor}|${tam}|${dep}|${s.rua}|${s.pos}`;
+    if (!grouped.has(key)) {
+      grouped.set(key, { codigo, cor, tam, dep, rua: s.rua, pos: s.pos, levels: [] });
+    }
+    grouped.get(key)!.levels.push(s.nivel);
+  }
+
+  for (const g of grouped.values()) {
+    const localStr = formatLevelsToSisplanLocal(g.rua, g.pos, g.levels);
+    lines.push(`${g.codigo};${g.cor};${g.tam};${g.dep};${localStr}`);
+  }
+
+  // Anexa colmeias de Transbordo
+  const trbValues = Object.values(transbordoRegistry || {});
+  if (trbValues.length > 0) {
+    const trbGrouped = new Map<
+      string,
+      { codigo: string; cor: string; tam: string; rua: string; pos: number; levels: number[] }
+    >();
+    for (const trb of trbValues) {
+      const dec = decodeSkuPrefix(trb.code);
+      const parts = String(trb.code || '').split(/\s*-\s*/);
+      const codigo = parts[0] || dec.dMarca + dec.dEtiqueta + dec.dGrupo + dec.modelSeq;
+      const cor = parts[1] || dec.colorCode;
+      const tam = parts[2] || dec.size;
+      const key = `TRB|${codigo}|${cor}|${tam}|${trb.rua}|${trb.pos}`;
+      if (!trbGrouped.has(key)) {
+        trbGrouped.set(key, { codigo, cor, tam, rua: trb.rua, pos: trb.pos, levels: [] });
+      }
+      trbGrouped.get(key)!.levels.push(trb.nivel);
+    }
+    for (const tg of trbGrouped.values()) {
+      const localStr = formatLevelsToSisplanLocal(tg.rua, tg.pos, tg.levels);
+      lines.push(`${tg.codigo};${tg.cor};${tg.tam};2-TRANSBORDO;${localStr}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
+// ============================================================================
+// PERSISTENCE (LocalStorage + SessionStorage + window.name + IndexedDB)
+// ============================================================================
+export interface WmsPersistedSnapshot {
+  csv: string;
+  movedSkus: Record<string, MovedSkuEntry>;
+  transbordo: TransbordoEntry[];
+  updatedAt: string;
+}
+
+function saveToIndexedDB(payloadStr: string) {
+  try {
+    if (!window.indexedDB) return;
+    const req = window.indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = e => {
+      const db = (e.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.createObjectStore(IDB_STORE);
+      }
+    };
+    req.onsuccess = e => {
+      try {
+        const db = (e.target as IDBOpenDBRequest).result;
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).put(payloadStr, IDB_RECORD_KEY);
+      } catch {
+        // ignore
+      }
+    };
+  } catch {
+    // ignore
+  }
+}
+
+export function loadFromIndexedDB(): Promise<string | null> {
+  return new Promise(resolve => {
+    try {
+      if (!window.indexedDB) return resolve(null);
+      const req = window.indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = e => {
+        const db = (e.target as IDBOpenDBRequest).result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE);
+        }
+      };
+      req.onsuccess = e => {
+        try {
+          const db = (e.target as IDBOpenDBRequest).result;
+          const tx = db.transaction(IDB_STORE, 'readonly');
+          const getReq = tx.objectStore(IDB_STORE).get(IDB_RECORD_KEY);
+          getReq.onsuccess = () => resolve((getReq.result as string) || null);
+          getReq.onerror = () => resolve(null);
+        } catch {
+          resolve(null);
+        }
+      };
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+export function saveWmsStateLocally(
+  skus: SkuItem[],
+  movedSkusRegistry: Record<string, MovedSkuEntry>,
+  transbordoRegistry: Record<string, TransbordoEntry>
+): string {
+  const csvStr = buildSisplanCsvString(skus, transbordoRegistry);
+  const payloadObj: WmsPersistedSnapshot = {
+    csv: csvStr,
+    movedSkus: movedSkusRegistry,
+    transbordo: Object.values(transbordoRegistry),
+    updatedAt: new Date().toISOString()
+  };
+  const payloadStr = JSON.stringify(payloadObj);
+
+  try {
+    localStorage.setItem(STORAGE_KEY, payloadStr);
+  } catch {
+    // ignore
+  }
+  try {
+    sessionStorage.setItem(STORAGE_KEY, payloadStr);
+  } catch {
+    // ignore
+  }
+  try {
+    window.name = 'WMS_STATE_V8:' + payloadStr;
+  } catch {
+    // ignore
+  }
+  saveToIndexedDB(payloadStr);
+  return csvStr;
+}
+
+export function loadLocalWmsSnapshotSync(): WmsPersistedSnapshot | null {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(STORAGE_KEY);
+  } catch {
+    // ignore
+  }
+  if (!raw) {
+    try {
+      raw = sessionStorage.getItem(STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  }
+  if (!raw) {
+    try {
+      if (window.name && window.name.startsWith('WMS_STATE_V8:')) {
+        raw = window.name.slice('WMS_STATE_V8:'.length);
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.csv === 'string') {
+      return parsed as WmsPersistedSnapshot;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+// ============================================================================
+// GOOGLE APPS SCRIPT CLOUD SYNC (FETCH + JSONP FALLBACK FOR GOOGLE SITES)
+// ============================================================================
+export function getSavedCloudSyncUrl(): string {
+  try {
+    return localStorage.getItem(CLOUD_URL_STORAGE_KEY) || EMBEDDED_CLOUD_SYNC_URL;
+  } catch {
+    return EMBEDDED_CLOUD_SYNC_URL;
+  }
+}
+
+export function setSavedCloudSyncUrl(url: string) {
+  try {
+    localStorage.setItem(CLOUD_URL_STORAGE_KEY, url.trim());
+  } catch {
+    // ignore
+  }
+}
+
+function callCloudViaJsonp(
+  urlStr: string,
+  paramsObj: Record<string, string> = {},
+  timeoutMs = 12000
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const cbName =
+      'wmsCloudCb_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+    const script = document.createElement('script');
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      try {
+        delete (window as unknown as Record<string, unknown>)[cbName];
+      } catch {
+        (window as unknown as Record<string, unknown>)[cbName] = undefined;
+      }
+      if (script.parentNode) script.parentNode.removeChild(script);
+    };
+
+    (window as unknown as Record<string, unknown>)[cbName] = (data: Record<string, unknown>) => {
+      cleanup();
+      resolve(data);
+    };
+
+    script.onerror = () => {
+      cleanup();
+      reject(new Error('Falha de conexão JSONP com o Google Apps Script'));
+    };
+
+    timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('Tempo limite excedido ao conectar com a Planilha Google'));
+    }, timeoutMs);
+
+    const q = new URLSearchParams({
+      ...paramsObj,
+      callback: cbName,
+      t: String(Date.now())
+    });
+    const sep = urlStr.includes('?') ? '&' : '?';
+    script.src = `${urlStr}${sep}${q.toString()}`;
+    document.head.appendChild(script);
+  });
+}
+
+export async function pullStateFromCloud(
+  cloudUrl: string
+): Promise<{ csv: string; updatedAt?: string } | null> {
+  const url = cloudUrl.trim();
+  if (!url) return null;
+
+  const sep = url.includes('?') ? '&' : '?';
+  try {
+    const res = await fetch(`${url}${sep}action=get&t=${Date.now()}`, {
+      method: 'GET',
+      redirect: 'follow'
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && typeof data.csv === 'string' && data.csv.includes(';')) {
+        return { csv: data.csv, updatedAt: data.updatedAt };
+      }
+    }
+  } catch {
+    // Fallback to JSONP for Google Sites iframe CORS restrictions
+  }
+
+  try {
+    const data = await callCloudViaJsonp(url, { action: 'get' });
+    if (data && typeof data.csv === 'string' && String(data.csv).includes(';')) {
+      return { csv: String(data.csv), updatedAt: String(data.updatedAt || '') };
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+export async function pushStateToCloud(
+  cloudUrl: string,
+  csvStr: string
+): Promise<boolean> {
+  const url = cloudUrl.trim();
+  if (!url) return false;
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'save',
+        csv: csvStr,
+        updatedAt: new Date().toISOString()
+      })
+    });
+    if (res.ok) return true;
+  } catch {
+    // Fallback to JSONP/no-cors
+    try {
+      await fetch(url, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({
+          action: 'save',
+          csv: csvStr,
+          updatedAt: new Date().toISOString()
+        })
+      });
+      return true;
+    } catch {
+      // ignore
+    }
+  }
+  return false;
+}
+
+// ============================================================================
+// STANDALONE GOOGLE SITES HTML GENERATOR (CLEAN & OPTIMIZED)
+// ============================================================================
+export async function generateCleanStandaloneHtml(
+  skus: SkuItem[],
+  transbordoRegistry: Record<string, TransbordoEntry>,
+  cloudSyncUrl: string
+): Promise<string> {
+  const csvStr = buildSisplanCsvString(skus, transbordoRegistry);
+  const trbList = Object.values(transbordoRegistry);
+
+  try {
+    const res = await fetch('/assets/aistudio/estoque_macos_atualizado_2026-11-04__1__231bc99e.html');
+    if (res.ok) {
+      let rawHtml = await res.text();
+
+      // 1. Remove duplicate Google Sites Atari <base> tags & scripts injected by old iframe exports
+      rawHtml = rawHtml.replace(/<base[^>]*atari-embeds[^>]*>[\s\S]*?<\/script>/gi, '');
+
+      // 2. Clean out the 3,500 lines of static pre-rendered cards inside #wmsMapCanvas and #macroStreetsStrip
+      rawHtml = rawHtml.replace(
+        /(<div id="macroStreetsStrip"[^>]*>)[\s\S]*?(<\/div>\s*<\/div>\s*<!-- Perspectives Bar)/i,
+        '$1</div>$2'
+      );
+
+      // 3. Inject updated EMBEDDED_SISPLAN_CSV, EMBEDDED_TRANSBORDO_DATA, and EMBEDDED_CLOUD_SYNC_URL
+      rawHtml = rawHtml.replace(
+        /\/\*__CSV_DATA_START__\*\/[\s\S]*?\/\*__CSV_DATA_END__\*\//,
+        `/*__CSV_DATA_START__*/const EMBEDDED_SISPLAN_CSV = ${JSON.stringify(csvStr)};/*__CSV_DATA_END__*/`
+      );
+      rawHtml = rawHtml.replace(
+        /\/\*__TRANSBORDO_START__\*\/[\s\S]*?\/\*__TRANSBORDO_END__\*\//,
+        `/*__TRANSBORDO_START__*/const EMBEDDED_TRANSBORDO_DATA = ${JSON.stringify(trbList)};/*__TRANSBORDO_END__*/`
+      );
+      rawHtml = rawHtml.replace(
+        /\/\*__CLOUD_URL_START__\*\/[\s\S]*?\/\*__CLOUD_URL_END__\*\//,
+        `/*__CLOUD_URL_START__*/const EMBEDDED_CLOUD_SYNC_URL = ${JSON.stringify(cloudSyncUrl.trim())};/*__CLOUD_URL_END__*/`
+      );
+
+      return '<!DOCTYPE html>\n' + rawHtml.trim();
+    }
+  } catch {
+    // Fallback if template fetch fails
+  }
+
+  return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>EstoqueOS Sequoia WMS</title></head><body><pre>${csvStr}</pre></body></html>`;
+}
+
+export function triggerCsvDownload(csvContent: string, filename: string) {
+  const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
