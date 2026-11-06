@@ -247,6 +247,17 @@ export function parseCsvData(
     };
   }
 
+  const cleanHeader = (s: string) =>
+    s
+      .toUpperCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^A-Z0-9]/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_|_$/g, '');
+
+  const cleanedCols = splitRow(firstLine).map(cleanHeader);
+
   let idxCodigo = 0;
   let idxCor = 1;
   let idxTam = 2;
@@ -261,19 +272,21 @@ export function parseCsvData(
   let isEightColFormat = false;
 
   if (hasHeader) {
-    const findCol = (names: string[]) => firstCols.findIndex(c => names.includes(c));
-    const cCod = findCol(['CODIGO', 'SKU', 'PRODUTO', 'REF']);
-    const cCor = findCol(['COR', 'COD COR', 'COLOR']);
-    const cTam = findCol(['TAMANHO', 'TAM', 'SIZE']);
-    const cDep = findCol(['DEPOSITO', 'DEP']);
-    const cLocCad = findCol(['LOCAL CADASTRO', 'LOCAL_CADASTRO', 'LOCAL CADA', 'LOCAL CADA:', 'LOCAL SKUS', 'LOCAL SKU']);
-    const cLocBarras = findCol(['LOCAIS_BARRAS', 'LOCAIS BARRAS', 'LOCAIS_BARRA', 'LOCAIS BARRA', 'LOCAIS BARRAS (PÇS)']);
-    const cLocAtual = findCol(['LOCAL ATUAL', 'LOCAL_ATUAL', 'LOCAL BARRA', 'CAIXA ATUAL']);
-    const cLoc = findCol(['LOCAL', 'ENDERECO', 'WMS']);
-    const cCol = findCol(['COLECAO', 'COL', 'COLEÇÃO']);
-    const cQtd = findCol(['TOTAL_PECAS', 'TOTAL PECAS', 'TOTAL_PECA', 'TOTAL_PEÇAS', 'QTD', 'QUANTIDADE', 'PECAS', 'SALDO', 'QTY']);
-    const cTipo = findCol(['TIPO', 'MODALIDADE', 'STATUS_COLMEIA']);
-    const cObs = findCol(['OBSERVACAO', 'OBS', 'NOTA']);
+    const findColByPattern = (regex: RegExp) =>
+      cleanedCols.findIndex(c => regex.test(c));
+
+    const cCod = findColByPattern(/^(?:CODIGO|SKU|PRODUTO|REF|REFERENCIA|MODELO)$/);
+    const cCor = findColByPattern(/^(?:COR|COD_COR|COLOR)$/);
+    const cTam = findColByPattern(/^(?:TAMANHO|TAM|SIZE|GRADE)$/);
+    const cDep = findColByPattern(/^(?:DEPOSITO|DEP|DEPOSIT)$/);
+    const cLocCad = findColByPattern(/^(?:LOCAL_CADASTRO|LOCAL_CADA|LOCAL_SKU|LOCAL_SKUS|ENDERECO_CADASTRO|LOCAL_REGISTRADO)$/);
+    const cLocBarras = findColByPattern(/^(?:LOCAIS?_BARRAS?.*|CAIXAS?_BARRAS?.*|ENDERECOS?_BARRAS?.*|LOCAL_BARRA.*)$/);
+    const cLocAtual = findColByPattern(/^(?:LOCAL_ATUAL|ENDERECO_ATUAL|LOCAL_FISICO|CAIXA_ATUAL)$/);
+    const cLoc = findColByPattern(/^(?:LOCAL|ENDERECO|WMS|POSICAO)$/);
+    const cCol = findColByPattern(/^(?:COLECAO|COL|ESTACAO)$/);
+    const cQtd = findColByPattern(/^(?:TOTAL.*PECAS?|TOTAL.*ITEN?S?|QTD.*ITEMS?|QTD.*ITENS?|QTD.*PECAS?|QUANTIDADE.*|TOTAL|QTD|QTY|PECAS?|SALDO.*|ITENS?|ITEMS?)$/);
+    const cTipo = findColByPattern(/^(?:TIPO|MODALIDADE|STATUS_COLMEIA)$/);
+    const cObs = findColByPattern(/^(?:OBSERVACAO|OBS|NOTA)$/);
 
     if (cCod !== -1) idxCodigo = cCod;
     if (cCor !== -1) idxCor = cCor;
@@ -283,15 +296,14 @@ export function parseCsvData(
     if (cObs !== -1) idxObs = cObs;
     if (cCol !== -1) idxColecao = cCol;
     if (cLocBarras !== -1) idxLocaisBarras = cLocBarras;
+    if (cQtd !== -1) idxQtd = cQtd;
 
     if (cLocCad !== -1 || cLocBarras !== -1 || cLocAtual !== -1) {
       isEightColFormat = true;
-      idxLocal = cLocCad !== -1 ? cLocCad : cLoc !== -1 ? cLoc : 2;
+      idxLocal = cLocCad !== -1 ? cLocCad : cLoc !== -1 ? cLoc : 4;
       idxLocalAtual = cLocAtual !== -1 ? cLocAtual : idxLocal;
-      idxQtd = cQtd !== -1 ? cQtd : -1;
     } else if (cLoc !== -1) {
       idxLocal = cLoc;
-      if (cQtd !== -1) idxQtd = cQtd;
     }
   } else {
     const sampleCols = splitRow(lines[0]);
@@ -348,7 +360,7 @@ export function parseCsvData(
       rawCodigo = cols[idxCodigo] || cols[0];
       rawCor = cols[idxCor] || cols[1];
       rawTam = cols[idxTam] || cols[2];
-      rawDep = cols[idxDep] || cols[3] || '2';
+      rawDep = idxDep !== -1 && cols[idxDep] ? cols[idxDep] : '2';
       rawLocal = cols[idxLocal] || cols[4];
       rawLocalAtual = rawLocal;
       if (idxQtd !== -1 && cols[idxQtd]) {
@@ -634,12 +646,22 @@ export function parseCsvData(
 
 export function buildSisplanCsvString(
   skus: SkuItem[],
-  transbordoRegistry: Record<string, TransbordoEntry>
+  transbordoRegistry: Record<string, TransbordoEntry>,
+  barraItems: SkuItem[] = []
 ): string {
-  const lines = ['CODIGO;COR;TAMANHO;DEPOSITO;LOCAL'];
-  const grouped = new Map<
+  const lines = ['CODIGO;COR;TAMANHO;DEPOSITO;LOCAL_CADASTRO;COLECAO;LOCAIS_BARRAS;TOTAL_PECAS'];
+
+  // Agrupa SKUs pelo código canônico
+  const skuMap = new Map<
     string,
-    { codigo: string; cor: string; tam: string; dep: string; rua: string; pos: number; levels: number[] }
+    {
+      codigo: string;
+      cor: string;
+      tam: string;
+      dep: string;
+      colecao: string;
+      items: SkuItem[];
+    }
   >();
 
   for (const s of skus) {
@@ -649,16 +671,79 @@ export function buildSisplanCsvString(
     const cor = s.colorCode || dec.colorCode;
     const tam = s.size || dec.size;
     const dep = s.deposito || '2';
-    const key = `${codigo}|${cor}|${tam}|${dep}|${s.rua}|${s.pos}`;
-    if (!grouped.has(key)) {
-      grouped.set(key, { codigo, cor, tam, dep, rua: s.rua, pos: s.pos, levels: [] });
+    const key = `${codigo}|${cor}|${tam}|${dep}`;
+    if (!skuMap.has(key)) {
+      skuMap.set(key, {
+        codigo,
+        cor,
+        tam,
+        dep,
+        colecao: s.colecao || (isReservedCol35Street(s.rua) ? '35' : '51'),
+        items: []
+      });
     }
-    grouped.get(key)!.levels.push(s.nivel);
+    skuMap.get(key)!.items.push(s);
   }
 
-  for (const g of grouped.values()) {
-    const localStr = formatLevelsToSisplanLocal(g.rua, g.pos, g.levels);
-    lines.push(`${g.codigo};${g.cor};${g.tam};${g.dep};${localStr}`);
+  // Mapeia barraItems por SKU key
+  const barraMap = new Map<string, SkuItem[]>();
+  for (const b of barraItems) {
+    if (b.isTransbordo) continue;
+    const dec = decodeSkuPrefix(b.code);
+    const codigo = b.codigoBase || dec.dMarca + dec.dEtiqueta + dec.dGrupo + dec.modelSeq;
+    const cor = b.colorCode || dec.colorCode;
+    const tam = b.size || dec.size;
+    const dep = b.deposito || '2';
+    const key = `${codigo}|${cor}|${tam}|${dep}`;
+    if (!barraMap.has(key)) {
+      barraMap.set(key, []);
+    }
+    barraMap.get(key)!.push(b);
+  }
+
+  for (const group of skuMap.values()) {
+    // 1. Constrói LOCAL_CADASTRO agrupando colunas (ex: RF.029.1 - 6)
+    const colGrouped = new Map<string, { rua: string; pos: number; levels: number[] }>();
+    for (const item of group.items) {
+      const colKey = `${item.rua}|${item.pos}`;
+      if (!colGrouped.has(colKey)) {
+        colGrouped.set(colKey, { rua: item.rua, pos: item.pos, levels: [] });
+      }
+      colGrouped.get(colKey)!.levels.push(item.nivel);
+    }
+    const localCadastroParts = Array.from(colGrouped.values()).map(cg =>
+      formatLevelsToSisplanLocal(cg.rua, cg.pos, cg.levels)
+    );
+    const localCadastro = localCadastroParts.join(' / ') || group.items[0]?.rawLocal || 'Sem Local';
+
+    // 2. Constrói LOCAIS_BARRAS com quantidades individuais exatas por caixa (ex: RF.029.6 (46 pçs) | ...)
+    const key = `${group.codigo}|${group.cor}|${group.tam}|${group.dep}`;
+    const matchingBoxes = barraMap.get(key) || [];
+
+    let locaisBarras = '';
+    let totalPecas = 0;
+
+    if (matchingBoxes.length > 0) {
+      locaisBarras = matchingBoxes
+        .map(b => `${b.wms} (${b.qty || 1} pçs)`)
+        .join(' | ');
+      totalPecas = matchingBoxes.reduce((acc, b) => acc + (b.qty || 1), 0);
+    } else {
+      const activeLevels = group.items.filter(it => (it.qty || 0) > 0);
+      if (activeLevels.length > 0) {
+        locaisBarras = activeLevels
+          .map(it => `${it.wms} (${it.qty || 1} pçs)`)
+          .join(' | ');
+        totalPecas = activeLevels.reduce((acc, it) => acc + (it.qty || 1), 0);
+      } else {
+        locaisBarras = group.items.map(it => `${it.wms} (1 pçs)`).join(' | ');
+        totalPecas = group.items.length;
+      }
+    }
+
+    lines.push(
+      `${group.codigo};${group.cor};${group.tam};${group.dep};${localCadastro};${group.colecao};${locaisBarras};${totalPecas}`
+    );
   }
 
   // Anexa colmeias de Transbordo
@@ -682,7 +767,7 @@ export function buildSisplanCsvString(
     }
     for (const tg of trbGrouped.values()) {
       const localStr = formatLevelsToSisplanLocal(tg.rua, tg.pos, tg.levels);
-      lines.push(`${tg.codigo};${tg.cor};${tg.tam};2-TRANSBORDO;${localStr}`);
+      lines.push(`${tg.codigo};${tg.cor};${tg.tam};2-TRANSBORDO;${localStr};35;${localStr} (1 pçs);${tg.levels.length}`);
     }
   }
 
@@ -694,8 +779,12 @@ export function buildSisplanCsvString(
 // ============================================================================
 export interface WmsPersistedSnapshot {
   csv: string;
+  rawImportedCsv?: string;
+  skusData?: SkuItem[];
+  barraItemsData?: SkuItem[];
   movedSkus: Record<string, MovedSkuEntry>;
   transbordo: TransbordoEntry[];
+  wmsPerspective?: 'sku' | 'barra';
   updatedAt: string;
 }
 
@@ -755,13 +844,20 @@ export function loadFromIndexedDB(): Promise<string | null> {
 export function saveWmsStateLocally(
   skus: SkuItem[],
   movedSkusRegistry: Record<string, MovedSkuEntry>,
-  transbordoRegistry: Record<string, TransbordoEntry>
+  transbordoRegistry: Record<string, TransbordoEntry>,
+  barraItems: SkuItem[] = [],
+  rawImportedCsv = '',
+  wmsPerspective: 'sku' | 'barra' = 'sku'
 ): string {
-  const csvStr = buildSisplanCsvString(skus, transbordoRegistry);
+  const csvStr = buildSisplanCsvString(skus, transbordoRegistry, barraItems);
   const payloadObj: WmsPersistedSnapshot = {
     csv: csvStr,
+    rawImportedCsv: rawImportedCsv || undefined,
+    skusData: skus,
+    barraItemsData: barraItems,
     movedSkus: movedSkusRegistry,
-    transbordo: Object.values(transbordoRegistry),
+    transbordo: Object.values(transbordoRegistry || {}),
+    wmsPerspective,
     updatedAt: new Date().toISOString()
   };
   const payloadStr = JSON.stringify(payloadObj);
@@ -811,7 +907,7 @@ export function loadLocalWmsSnapshotSync(): WmsPersistedSnapshot | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed.csv === 'string') {
+    if (parsed && (typeof parsed.csv === 'string' || Array.isArray(parsed.skusData))) {
       return parsed as WmsPersistedSnapshot;
     }
   } catch {

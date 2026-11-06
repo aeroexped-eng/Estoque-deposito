@@ -43,7 +43,8 @@ import {
   pullStateFromCloud,
   pushStateToCloud,
   generateCleanStandaloneHtml,
-  triggerCsvDownload
+  triggerCsvDownload,
+  WmsPersistedSnapshot
 } from './utils/storageAndSync';
 import { ReportModal } from './components/ReportModal';
 import { InventoryAuditModal } from './components/InventoryAuditModal';
@@ -159,6 +160,7 @@ export default function App() {
   const [csvPasteText, setCsvPasteText] = useState<string>('');
   const [csvImportMode, setCsvImportMode] = useState<'merge' | 'replace'>('merge');
   const [csvFileName, setCsvFileName] = useState<string>('Solte seu arquivo .CSV ou clique para selecionar');
+  const [rawImportedCsv, setRawImportedCsv] = useState<string>('');
 
   // SKU Allocate/Edit Modal State
   const [skuFormEditId, setSkuFormEditId] = useState<string>('');
@@ -286,33 +288,68 @@ export default function App() {
     let mounted = true;
 
     const applyCsvAndSnapshot = (
-      csvText: string,
+      source: WmsPersistedSnapshot | string,
       savedMoved?: Record<string, MovedSkuEntry>,
       savedTrb?: TransbordoEntry[]
     ) => {
+      let csvText = '';
+      let skusFromSnap: SkuItem[] | undefined;
+      let barraFromSnap: SkuItem[] | undefined;
+      let movedFromSnap = savedMoved;
+      let trbFromSnap = savedTrb;
+      let rawCsvFromSnap = '';
+      let perspectiveFromSnap: 'sku' | 'barra' | undefined;
+
+      if (typeof source === 'object' && source !== null) {
+        csvText = source.csv || '';
+        skusFromSnap = source.skusData;
+        barraFromSnap = source.barraItemsData;
+        movedFromSnap = source.movedSkus || savedMoved;
+        trbFromSnap = source.transbordo || savedTrb;
+        rawCsvFromSnap = source.rawImportedCsv || '';
+        perspectiveFromSnap = source.wmsPerspective;
+      } else {
+        csvText = source;
+      }
+
       const initTrb: Record<string, TransbordoEntry> = {};
       for (const entry of EMBEDDED_TRANSBORDO_DATA) {
         initTrb[entry.wms] = { ...entry };
       }
-      if (Array.isArray(savedTrb)) {
-        for (const t of savedTrb) {
+      if (Array.isArray(trbFromSnap)) {
+        for (const t of trbFromSnap) {
           if (t && t.wms) initTrb[t.wms] = t;
         }
       }
 
+      // Restaura dados estruturados com quantidades intactas se presentes no snapshot
+      if (Array.isArray(skusFromSnap) && skusFromSnap.length > 0) {
+        if (!mounted) return;
+        setSkus(skusFromSnap);
+        setBarraItems(Array.isArray(barraFromSnap) ? barraFromSnap : []);
+        setTransbordoRegistry(initTrb);
+        if (movedFromSnap) setMovedSkusRegistry(movedFromSnap);
+        setOriginalBaselineLocations(buildBaselineFromSkus(skusFromSnap));
+        if (rawCsvFromSnap) setRawImportedCsv(rawCsvFromSnap);
+        if (perspectiveFromSnap) setWmsPerspective(perspectiveFromSnap);
+        return;
+      }
+
+      // Fallback para parse de CSV (que agora também preserva 8 colunas com total_pecas e locais_barras)
       const parsed = parseCsvData(csvText, [], [], initTrb, 'replace');
       if (!mounted) return;
       setSkus(parsed.skus);
       setBarraItems(parsed.barraItems);
       setTransbordoRegistry(parsed.transbordoRegistry);
-      if (savedMoved) setMovedSkusRegistry(savedMoved);
+      if (movedFromSnap) setMovedSkusRegistry(movedFromSnap);
       setOriginalBaselineLocations(buildBaselineFromSkus(parsed.skus));
+      if (rawCsvFromSnap) setRawImportedCsv(rawCsvFromSnap);
     };
 
     // 1. Synchronous load
     const syncSnap = loadLocalWmsSnapshotSync();
-    if (syncSnap && syncSnap.csv) {
-      applyCsvAndSnapshot(syncSnap.csv, syncSnap.movedSkus, syncSnap.transbordo);
+    if (syncSnap) {
+      applyCsvAndSnapshot(syncSnap);
     } else {
       applyCsvAndSnapshot(EMBEDDED_SISPLAN_CSV);
     }
@@ -323,9 +360,9 @@ export default function App() {
         const idbRaw = await loadFromIndexedDB();
         if (idbRaw && mounted) {
           try {
-            const parsedIdb = JSON.parse(idbRaw);
-            if (parsedIdb && typeof parsedIdb.csv === 'string') {
-              applyCsvAndSnapshot(parsedIdb.csv, parsedIdb.movedSkus, parsedIdb.transbordo);
+            const parsedIdb = JSON.parse(idbRaw) as WmsPersistedSnapshot;
+            if (parsedIdb) {
+              applyCsvAndSnapshot(parsedIdb);
             }
           } catch {
             // ignore
@@ -361,10 +398,28 @@ export default function App() {
       nextSkus: SkuItem[],
       nextMoved: Record<string, MovedSkuEntry>,
       nextTrb: Record<string, TransbordoEntry>,
+      nextBarraOrPushCloud: SkuItem[] | boolean = barraItems,
+      customRawCsv?: string,
       pushCloud = true
     ) => {
-      const csvStr = saveWmsStateLocally(nextSkus, nextMoved, nextTrb);
-      if (pushCloud && cloudSyncUrl) {
+      let actualBarra: SkuItem[] = barraItems;
+      let actualPushCloud = pushCloud;
+      if (typeof nextBarraOrPushCloud === 'boolean') {
+        actualPushCloud = nextBarraOrPushCloud;
+        actualBarra = barraItems;
+      } else if (Array.isArray(nextBarraOrPushCloud)) {
+        actualBarra = nextBarraOrPushCloud;
+      }
+      const rawCsvToUse = customRawCsv !== undefined ? customRawCsv : rawImportedCsv;
+      const csvStr = saveWmsStateLocally(
+        nextSkus,
+        nextMoved,
+        nextTrb,
+        actualBarra,
+        rawCsvToUse,
+        wmsPerspective
+      );
+      if (actualPushCloud && cloudSyncUrl) {
         setCloudStatus('syncing');
         setCloudStatusText('Salvando Nuvem...');
         pushStateToCloud(cloudSyncUrl, csvStr).then(ok => {
@@ -373,14 +428,21 @@ export default function App() {
         });
       }
     },
-    [cloudSyncUrl]
+    [barraItems, rawImportedCsv, wmsPerspective, cloudSyncUrl]
   );
 
   // Manual save trigger
   const executeManualSave = useCallback(() => {
     setIsAutoSaving(true);
     try {
-      const csvStr = saveWmsStateLocally(skus, movedSkusRegistry, transbordoRegistry);
+      const csvStr = saveWmsStateLocally(
+        skus,
+        movedSkusRegistry,
+        transbordoRegistry,
+        barraItems,
+        rawImportedCsv,
+        wmsPerspective
+      );
       const now = new Date();
       setLastSavedTimestamp(now);
       setAutoSaveCountdown(autoSaveIntervalSeconds);
@@ -394,7 +456,7 @@ export default function App() {
       }
       showToast(
         'Progresso Salvo com Sucesso',
-        `Gravado às ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} no LocalStorage e IndexedDB.`,
+        `Gravado às ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} com quantidades de peças preservadas.`,
         '💾'
       );
     } catch (err) {
@@ -403,19 +465,26 @@ export default function App() {
     } finally {
       setTimeout(() => setIsAutoSaving(false), 500);
     }
-  }, [skus, movedSkusRegistry, transbordoRegistry, autoSaveIntervalSeconds, soundEnabled, cloudSyncUrl, showToast]);
+  }, [skus, movedSkusRegistry, transbordoRegistry, barraItems, rawImportedCsv, wmsPerspective, autoSaveIntervalSeconds, soundEnabled, cloudSyncUrl, showToast]);
 
   // Save and safe page reload
   const executeSaveAndReload = useCallback(() => {
     setIsAutoSaving(true);
-    saveWmsStateLocally(skus, movedSkusRegistry, transbordoRegistry);
+    saveWmsStateLocally(
+      skus,
+      movedSkusRegistry,
+      transbordoRegistry,
+      barraItems,
+      rawImportedCsv,
+      wmsPerspective
+    );
     setLastSavedTimestamp(new Date());
     playMacSound('success', soundEnabled);
     showToast('Progresso Salvo com Segurança', 'Recarregando página em 1 segundo...', '🔄');
     setTimeout(() => {
       window.location.reload();
     }, 900);
-  }, [skus, movedSkusRegistry, transbordoRegistry, soundEnabled, showToast]);
+  }, [skus, movedSkusRegistry, transbordoRegistry, barraItems, rawImportedCsv, wmsPerspective, soundEnabled, showToast]);
 
   // Periodic Auto-Save interval (~2 minutes countdown)
   useEffect(() => {
@@ -426,7 +495,14 @@ export default function App() {
         if (prev <= 1) {
           // Execute auto-save cycle
           try {
-            const csvStr = saveWmsStateLocally(skus, movedSkusRegistry, transbordoRegistry);
+            const csvStr = saveWmsStateLocally(
+              skus,
+              movedSkusRegistry,
+              transbordoRegistry,
+              barraItems,
+              rawImportedCsv,
+              wmsPerspective
+            );
             const now = new Date();
             setLastSavedTimestamp(now);
 
@@ -463,11 +539,14 @@ export default function App() {
   }, [
     isAutoSaveEnabled,
     autoSaveIntervalSeconds,
+    autoRefreshMode,
     skus,
     movedSkusRegistry,
     transbordoRegistry,
+    barraItems,
+    rawImportedCsv,
+    wmsPerspective,
     cloudSyncUrl,
-    autoRefreshMode,
     cloudStatus,
     showToast
   ]);
@@ -475,13 +554,20 @@ export default function App() {
   // Page unload safety listener (guarantees latest state is saved on refresh/close)
   useEffect(() => {
     const handleBeforeUnload = () => {
-      saveWmsStateLocally(skus, movedSkusRegistry, transbordoRegistry);
+      saveWmsStateLocally(
+        skus,
+        movedSkusRegistry,
+        transbordoRegistry,
+        barraItems,
+        rawImportedCsv,
+        wmsPerspective
+      );
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload);
     };
-  }, [skus, movedSkusRegistry, transbordoRegistry]);
+  }, [skus, movedSkusRegistry, transbordoRegistry, barraItems, rawImportedCsv, wmsPerspective]);
 
   // Global Cmd+S / Ctrl+S shortcut to save
   useEffect(() => {
@@ -1042,6 +1128,21 @@ export default function App() {
       };
     });
 
+    const nextBarra = barraItems.map(item => {
+      if (item.id !== activeItem.id) return item;
+      return {
+        ...item,
+        lastRelocatedFrom: item.wms,
+        rua: parsedDest.rua,
+        pos: parsedDest.pos,
+        nivel: parsedDest.nivel,
+        wms: parsedDest.wms,
+        localAtualRaw: parsedDest.wms,
+        isOutsideRegisteredLocal: item.localCadastroRaw ? !item.localCadastroRaw.includes(parsedDest.wms) : false,
+        colecao: isReservedCol35Street(parsedDest.rua) ? '35' : item.colecao
+      };
+    });
+
     const { nextMoved, staysMoved } = recordSkuMoved(
       activeItem,
       oldRaw,
@@ -1051,11 +1152,12 @@ export default function App() {
     );
 
     setSkus(nextSkus);
+    setBarraItems(nextBarra);
     setMovedSkusRegistry(nextMoved);
     setSelectedStreet(parsedDest.rua);
     setSelectedAddressKey(parsedDest.wms);
     setSelectedSkuId(activeItem.id);
-    persistCurrentState(nextSkus, nextMoved, transbordoRegistry);
+    persistCurrentState(nextSkus, nextMoved, transbordoRegistry, nextBarra);
     playMacSound(staysMoved ? 'success' : 'pop', soundEnabled);
     showToast(
       staysMoved ? 'SKU Movido p/ Vazio' : 'SKU Retornou ao Local Original',
@@ -1122,6 +1224,36 @@ export default function App() {
       return item;
     });
 
+    const nextBarra = barraItems.map(item => {
+      if (item.id === skuA.id) {
+        return {
+          ...item,
+          lastRelocatedFrom: wmsA,
+          rua: parsedB.rua,
+          pos: parsedB.pos,
+          nivel: parsedB.nivel,
+          wms: parsedB.wms,
+          localAtualRaw: parsedB.wms,
+          isOutsideRegisteredLocal: item.localCadastroRaw ? !item.localCadastroRaw.includes(parsedB.wms) : false,
+          colecao: isReservedCol35Street(parsedB.rua) ? '35' : item.colecao
+        };
+      }
+      if (item.id === skuB.id) {
+        return {
+          ...item,
+          lastRelocatedFrom: wmsB,
+          rua: parsedA.rua,
+          pos: parsedA.pos,
+          nivel: parsedA.nivel,
+          wms: parsedA.wms,
+          localAtualRaw: parsedA.wms,
+          isOutsideRegisteredLocal: item.localCadastroRaw ? !item.localCadastroRaw.includes(parsedA.wms) : false,
+          colecao: isReservedCol35Street(parsedA.rua) ? '35' : item.colecao
+        };
+      }
+      return item;
+    });
+
     let curMoved = { ...movedSkusRegistry };
     const resA = recordSkuMoved(skuA, wmsA, parsedB.wms, 'relocate', curMoved);
     curMoved = resA.nextMoved;
@@ -1129,11 +1261,12 @@ export default function App() {
     curMoved = resB.nextMoved;
 
     setSkus(nextSkus);
+    setBarraItems(nextBarra);
     setMovedSkusRegistry(curMoved);
     setSelectedStreet(parsedB.rua);
     setSelectedAddressKey(parsedB.wms);
     setSelectedSkuId(skuA.id);
-    persistCurrentState(nextSkus, curMoved, transbordoRegistry);
+    persistCurrentState(nextSkus, curMoved, transbordoRegistry, nextBarra);
     playMacSound('success', soundEnabled);
     showToast(
       'Troca Direta Realizada!',
@@ -1355,6 +1488,7 @@ export default function App() {
       return b;
     });
     setBarraItems(nextBarra);
+    persistCurrentState(skus, movedSkusRegistry, transbordoRegistry, nextBarra);
     playMacSound('success', soundEnabled);
     showToast(
       'Peça Devolvida ao Local Cadastrado',
@@ -5031,18 +5165,26 @@ export default function App() {
                     setSkus(res.skus);
                     setBarraItems(res.barraItems);
                     setTransbordoRegistry(res.transbordoRegistry);
+                    const nextMoved = csvImportMode === 'replace' ? {} : movedSkusRegistry;
                     if (csvImportMode === 'replace') {
                       setOriginalBaselineLocations(buildBaselineFromSkus(res.skus));
                       setMovedSkusRegistry({});
                     }
                     if (res.firstRua) selectStreet(res.firstRua);
                     if (res.firstWms) setSelectedAddressKey(res.firstWms);
-                    persistCurrentState(res.skus, movedSkusRegistry, res.transbordoRegistry);
+                    setRawImportedCsv(csvPasteText);
+                    persistCurrentState(
+                      res.skus,
+                      nextMoved,
+                      res.transbordoRegistry,
+                      res.barraItems,
+                      csvPasteText
+                    );
                     setShowImportModal(false);
                     playMacSound('success', soundEnabled);
                     showToast(
                       'Importação Concluída',
-                      `${res.importedCount} posições carregadas no mapa.`,
+                      `${res.importedCount} posições e quantidades de peças carregadas.`,
                       '📥'
                     );
                   }}
