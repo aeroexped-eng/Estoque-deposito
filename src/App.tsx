@@ -46,6 +46,8 @@ import {
   triggerCsvDownload
 } from './utils/storageAndSync';
 import { ReportModal } from './components/ReportModal';
+import { InventoryAuditModal } from './components/InventoryAuditModal';
+import { AutoSaveModal } from './components/AutoSaveModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
 type WmsPerspective = 'sku' | 'barra';
@@ -144,6 +146,14 @@ export default function App() {
   const [showSpotlight, setShowSpotlight] = useState<boolean>(false);
   const [showAboutModal, setShowAboutModal] = useState<boolean>(false);
   const [showReportModal, setShowReportModal] = useState<boolean>(false);
+  const [showAuditModal, setShowAuditModal] = useState<boolean>(false);
+  const [showAutoSaveModal, setShowAutoSaveModal] = useState<boolean>(false);
+  const [isAutoSaveEnabled, setIsAutoSaveEnabled] = useState<boolean>(true);
+  const [autoSaveIntervalSeconds, setAutoSaveIntervalSeconds] = useState<number>(120); // 2 minutos
+  const [autoSaveCountdown, setAutoSaveCountdown] = useState<number>(120);
+  const [autoRefreshMode, setAutoRefreshMode] = useState<'save_only' | 'save_and_sync' | 'save_and_reload'>('save_only');
+  const [lastSavedTimestamp, setLastSavedTimestamp] = useState<Date>(new Date());
+  const [isAutoSaving, setIsAutoSaving] = useState<boolean>(false);
 
   // Import CSV Modal State
   const [csvPasteText, setCsvPasteText] = useState<string>('');
@@ -365,6 +375,125 @@ export default function App() {
     },
     [cloudSyncUrl]
   );
+
+  // Manual save trigger
+  const executeManualSave = useCallback(() => {
+    setIsAutoSaving(true);
+    try {
+      const csvStr = saveWmsStateLocally(skus, movedSkusRegistry, transbordoRegistry);
+      const now = new Date();
+      setLastSavedTimestamp(now);
+      setAutoSaveCountdown(autoSaveIntervalSeconds);
+      playMacSound('success', soundEnabled);
+      if (cloudSyncUrl) {
+        setCloudStatus('syncing');
+        pushStateToCloud(cloudSyncUrl, csvStr).then(ok => {
+          setCloudStatus(ok ? 'ok' : 'error');
+          setCloudStatusText(ok ? 'Salvo na Nuvem' : 'Salvo Localmente');
+        });
+      }
+      showToast(
+        'Progresso Salvo com Sucesso',
+        `Gravado às ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} no LocalStorage e IndexedDB.`,
+        '💾'
+      );
+    } catch (err) {
+      console.error('Falha ao salvar progresso:', err);
+      showToast('Erro ao Salvar', 'Não foi possível gravar os dados localmente.', '⚠️');
+    } finally {
+      setTimeout(() => setIsAutoSaving(false), 500);
+    }
+  }, [skus, movedSkusRegistry, transbordoRegistry, autoSaveIntervalSeconds, soundEnabled, cloudSyncUrl, showToast]);
+
+  // Save and safe page reload
+  const executeSaveAndReload = useCallback(() => {
+    setIsAutoSaving(true);
+    saveWmsStateLocally(skus, movedSkusRegistry, transbordoRegistry);
+    setLastSavedTimestamp(new Date());
+    playMacSound('success', soundEnabled);
+    showToast('Progresso Salvo com Segurança', 'Recarregando página em 1 segundo...', '🔄');
+    setTimeout(() => {
+      window.location.reload();
+    }, 900);
+  }, [skus, movedSkusRegistry, transbordoRegistry, soundEnabled, showToast]);
+
+  // Periodic Auto-Save interval (~2 minutes countdown)
+  useEffect(() => {
+    if (!isAutoSaveEnabled) return;
+
+    const timerId = setInterval(() => {
+      setAutoSaveCountdown(prev => {
+        if (prev <= 1) {
+          // Execute auto-save cycle
+          try {
+            const csvStr = saveWmsStateLocally(skus, movedSkusRegistry, transbordoRegistry);
+            const now = new Date();
+            setLastSavedTimestamp(now);
+
+            if (cloudSyncUrl && (autoRefreshMode === 'save_and_sync' || cloudStatus === 'ok')) {
+              setCloudStatus('syncing');
+              pushStateToCloud(cloudSyncUrl, csvStr).then(ok => {
+                setCloudStatus(ok ? 'ok' : 'error');
+                setCloudStatusText(ok ? 'Salvo na Nuvem' : 'Salvo Localmente');
+              });
+            }
+
+            if (autoRefreshMode === 'save_and_reload') {
+              showToast('Auto-Salvamento Realizado', 'Recarregando página conforme configurado...', '🔄');
+              setTimeout(() => {
+                window.location.reload();
+              }, 1100);
+            } else {
+              showToast(
+                'Progresso Salvo Automaticamente',
+                `Ciclo de ${Math.round(autoSaveIntervalSeconds / 60)} min concluído às ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.`,
+                '💾'
+              );
+            }
+          } catch (err) {
+            console.error('Falha no ciclo de auto-salvamento:', err);
+          }
+          return autoSaveIntervalSeconds;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timerId);
+  }, [
+    isAutoSaveEnabled,
+    autoSaveIntervalSeconds,
+    skus,
+    movedSkusRegistry,
+    transbordoRegistry,
+    cloudSyncUrl,
+    autoRefreshMode,
+    cloudStatus,
+    showToast
+  ]);
+
+  // Page unload safety listener (guarantees latest state is saved on refresh/close)
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      saveWmsStateLocally(skus, movedSkusRegistry, transbordoRegistry);
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [skus, movedSkusRegistry, transbordoRegistry]);
+
+  // Global Cmd+S / Ctrl+S shortcut to save
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        executeManualSave();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [executeManualSave]);
 
   // Active items according to perspective (`sku` vs `barra`)
   const activeItems = useMemo(() => {
@@ -1915,12 +2044,55 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     setOpenMenu(null);
+                    executeManualSave();
+                  }}
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-blue-600 hover:text-white transition flex justify-between font-bold text-blue-600 dark:text-blue-400"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>💾</span>
+                    <span>Salvar Progresso Agora</span>
+                  </span>
+                  <span className="font-mono text-[10px] opacity-80">⌘S</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpenMenu(null);
+                    executeSaveAndReload();
+                  }}
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-blue-600 hover:text-white transition flex justify-between text-slate-700 dark:text-slate-200"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>🔄</span>
+                    <span>Salvar & Recarregar Página</span>
+                  </span>
+                  <span className="font-mono text-[10px] opacity-70">Reload</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpenMenu(null);
+                    setShowAutoSaveModal(true);
+                  }}
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex justify-between text-slate-700 dark:text-slate-200"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>⚙️</span>
+                    <span>Automação de Salvamento (2 min)</span>
+                  </span>
+                  <span className="font-mono text-[10px] opacity-75">{isAutoSaveEnabled ? 'Ativo' : 'Pausado'}</span>
+                </button>
+                <div className="border-t border-black/10 dark:border-white/10 my-1" />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpenMenu(null);
                     setShowCloudModal(true);
                   }}
                   className="w-full text-left px-3 py-2 rounded-lg bg-mac-blue/15 hover:bg-mac-blue hover:text-white transition flex justify-between font-extrabold text-mac-blue"
                 >
-                  <span>☁️ Salvar no Google Sites / HTML...</span>
-                  <span className="font-mono text-[10px] opacity-80">⌘S</span>
+                  <span>☁️ Sincronizar Google Sheets / Sites...</span>
+                  <span className="font-mono text-[10px] opacity-80">Nuvem</span>
                 </button>
                 <div className="border-t border-black/10 dark:border-white/10 my-1" />
                 <button
@@ -1963,7 +2135,7 @@ export default function App() {
             {openMenu === 'view' && (
               <div
                 onClick={e => e.stopPropagation()}
-                className="absolute left-36 top-7 w-60 mac-window rounded-xl p-1.5 shadow-2xl z-50 text-xs space-y-1"
+                className="absolute left-36 top-7 w-64 mac-window rounded-xl p-1.5 shadow-2xl z-50 text-xs space-y-1"
               >
                 <button
                   type="button"
@@ -2000,6 +2172,36 @@ export default function App() {
                   </span>
                   <span className="font-mono text-[10px] opacity-75">D3 Analytics</span>
                 </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpenMenu(null);
+                    setShowAuditModal(true);
+                  }}
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between font-bold text-rose-600 dark:text-rose-400 hover:text-white"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>📋</span>
+                    <span>Auditoria de Inventário</span>
+                  </span>
+                  <span className="font-mono text-[9px] px-1.5 py-0.2 rounded-full bg-rose-500/20 text-rose-600 dark:text-rose-400 font-extrabold">
+                    {conflictAnalysis.allConflictSlots.size + conflictAnalysis.invaderSlots.size} Alertas
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpenMenu(null);
+                    setShowAutoSaveModal(true);
+                  }}
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between text-blue-600 dark:text-blue-400 font-semibold"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>💾</span>
+                    <span>Status do Auto-Salvamento</span>
+                  </span>
+                  <span className="font-mono text-[10px] opacity-75">{Math.floor(autoSaveCountdown / 60)}m {autoSaveCountdown % 60}s</span>
+                </button>
                 <div className="border-t border-black/10 dark:border-white/10 my-1" />
                 <button
                   type="button"
@@ -2017,7 +2219,31 @@ export default function App() {
           </div>
 
           {/* Right Status Icons */}
-          <div className="flex items-center space-x-2.5">
+          <div className="flex items-center space-x-2">
+            {/* Auto-Save Status Pill Button */}
+            <button
+              type="button"
+              onClick={() => setShowAutoSaveModal(true)}
+              className="flex items-center space-x-1.5 px-2 py-0.5 rounded-md bg-blue-500/15 hover:bg-blue-500/25 border border-blue-500/30 text-blue-700 dark:text-blue-300 font-semibold transition text-[10px]"
+              title="Automação de Salvamento a cada 2 minutos • Clique para gerenciar ou salvar/recarregar a página"
+            >
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  isAutoSaving
+                    ? 'bg-amber-400 animate-ping'
+                    : isAutoSaveEnabled
+                      ? 'bg-blue-500'
+                      : 'bg-slate-400'
+                }`}
+              />
+              <span className="font-mono hidden sm:inline">
+                {isAutoSaveEnabled
+                  ? `Auto-Save: ${String(Math.floor(autoSaveCountdown / 60)).padStart(2, '0')}:${String(autoSaveCountdown % 60).padStart(2, '0')}`
+                  : 'Auto-Save: Pausado'}
+              </span>
+              <span className="sm:hidden font-mono">💾 2m</span>
+            </button>
+
             <button
               type="button"
               onClick={() => setShowCloudModal(true)}
@@ -5708,6 +5934,75 @@ export default function App() {
             setSelectedStreet(rua);
             setSelectedRangeId('1-20');
           }}
+        />
+      </ErrorBoundary>
+
+      {/* ==================================================================== */}
+      {/* MODAL 8: INVENTORY AUDIT MODAL (CONFLICTS & INVADERS TABLE)          */}
+      {/* ==================================================================== */}
+      <ErrorBoundary fallbackTitle="Falha ao renderizar Painel de Auditoria de Inventário">
+        <InventoryAuditModal
+          isOpen={showAuditModal}
+          onClose={() => setShowAuditModal(false)}
+          skus={skus}
+          barraItems={barraItems}
+          wmsPerspective={wmsPerspective}
+          conflictAnalysis={conflictAnalysis}
+          addressMap={addressMap}
+          onNavigateToSlot={(wms, rua) => {
+            setShowAuditModal(false);
+            setSelectedStreet(rua);
+            const parts = wms.split('.');
+            const pos = parseInt(parts[1], 10);
+            if (!isNaN(pos)) {
+              if (pos >= 1 && pos <= 20) setSelectedRangeId('1-20');
+              else if (pos >= 21 && pos <= 40) setSelectedRangeId('21-40');
+              else if (pos >= 41 && pos <= 60) setSelectedRangeId('41-60');
+              else if (pos >= 61 && pos <= 80) setSelectedRangeId('61-80');
+              else if (pos >= 81 && pos <= 100) setSelectedRangeId('81-100');
+              else if (pos >= 101 && pos <= 120) setSelectedRangeId('101-120');
+              else if (pos >= 121 && pos <= 140) setSelectedRangeId('121-140');
+              else setSelectedRangeId('ALL-OCCUPIED');
+            }
+            setSelectedAddressKey(wms);
+            const items = addressMap.get(wms) || [];
+            if (items[0]) setSelectedSkuId(items[0].id);
+            setInspectorOpenMobile(true);
+            setInspectorCollapsedDesktop(false);
+            showToast(`Endereço ${wms} Selecionado`, `Localizado na Rua ${rua}.`, '🎯');
+          }}
+        />
+      </ErrorBoundary>
+
+      {/* ==================================================================== */}
+      {/* MODAL 9: AUTOSAVE & AUTO-REFRESH AUTOMATION MODAL                    */}
+      {/* ==================================================================== */}
+      <ErrorBoundary fallbackTitle="Falha ao carregar Painel de Auto-Salvamento">
+        <AutoSaveModal
+          isOpen={showAutoSaveModal}
+          onClose={() => setShowAutoSaveModal(false)}
+          isAutoSaveEnabled={isAutoSaveEnabled}
+          onToggleAutoSave={setIsAutoSaveEnabled}
+          autoSaveIntervalSeconds={autoSaveIntervalSeconds}
+          onChangeInterval={sec => {
+            setAutoSaveIntervalSeconds(sec);
+            setAutoSaveCountdown(sec);
+            showToast('Intervalo Atualizado', `Auto-salvamento ajustado para ${Math.round(sec / 60)} min.`, '⏱️');
+          }}
+          autoRefreshMode={autoRefreshMode}
+          onChangeRefreshMode={setAutoRefreshMode}
+          countdownSeconds={autoSaveCountdown}
+          lastSavedAt={lastSavedTimestamp}
+          onSaveNow={() => {
+            executeManualSave();
+            setShowAutoSaveModal(false);
+          }}
+          onSaveAndReloadNow={() => {
+            setShowAutoSaveModal(false);
+            executeSaveAndReload();
+          }}
+          cloudSyncConfigured={Boolean(cloudSyncUrl)}
+          cloudStatusText={cloudStatusText}
         />
       </ErrorBoundary>
 
