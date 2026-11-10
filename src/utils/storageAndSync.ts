@@ -75,20 +75,26 @@ const IDB_STORE = 'wms_state_store';
 const IDB_RECORD_KEY = 'active_wms_snapshot';
 
 let audioCtx: AudioContext | null = null;
-export function playMacSound(type: 'pop' | 'success' | 'alert' = 'pop', enabled = true) {
+export function playMacSound(
+  type: 'pop' | 'success' | 'alert' | 'search' | 'empty' | 'select' | 'open' = 'pop',
+  enabled = true
+) {
   if (!enabled) return;
   try {
     if (!audioCtx) {
       const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       audioCtx = new AudioContextClass();
     }
-    const osc = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
-    osc.connect(gain);
-    gain.connect(audioCtx.destination);
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume().catch(() => {});
+    }
     const now = audioCtx.currentTime;
 
     if (type === 'pop') {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
       osc.type = 'sine';
       osc.frequency.setValueAtTime(520, now);
       osc.frequency.exponentialRampToValueAtTime(760, now + 0.055);
@@ -97,6 +103,10 @@ export function playMacSound(type: 'pop' | 'success' | 'alert' = 'pop', enabled 
       osc.start(now);
       osc.stop(now + 0.07);
     } else if (type === 'success') {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
       osc.type = 'triangle';
       osc.frequency.setValueAtTime(523.25, now);
       osc.frequency.setValueAtTime(659.25, now + 0.07);
@@ -106,6 +116,10 @@ export function playMacSound(type: 'pop' | 'success' | 'alert' = 'pop', enabled 
       osc.start(now);
       osc.stop(now + 0.29);
     } else if (type === 'alert') {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
       osc.type = 'sawtooth';
       osc.frequency.setValueAtTime(220, now);
       osc.frequency.setValueAtTime(175, now + 0.09);
@@ -113,6 +127,80 @@ export function playMacSound(type: 'pop' | 'success' | 'alert' = 'pop', enabled 
       gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
       osc.start(now);
       osc.stop(now + 0.23);
+    } else if (type === 'search') {
+      // Crisp 2-tone harmonic chime confirming Spotlight results found
+      const osc1 = audioCtx.createOscillator();
+      const gain1 = audioCtx.createGain();
+      osc1.connect(gain1);
+      gain1.connect(audioCtx.destination);
+      osc1.type = 'sine';
+      osc1.frequency.setValueAtTime(659.25, now); // E5
+      gain1.gain.setValueAtTime(0.045, now);
+      gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+      osc1.start(now);
+      osc1.stop(now + 0.085);
+
+      const osc2 = audioCtx.createOscillator();
+      const gain2 = audioCtx.createGain();
+      osc2.connect(gain2);
+      gain2.connect(audioCtx.destination);
+      osc2.type = 'sine';
+      osc2.frequency.setValueAtTime(880.00, now + 0.075); // A5
+      gain2.gain.setValueAtTime(0.001, now);
+      gain2.gain.setValueAtTime(0.05, now + 0.075);
+      gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.17);
+      osc2.start(now + 0.075);
+      osc2.stop(now + 0.175);
+    } else if (type === 'empty') {
+      // Gentle soft low blip when 0 results are found
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(261.63, now); // C4
+      osc.frequency.exponentialRampToValueAtTime(196.00, now + 0.11); // G3
+      gain.gain.setValueAtTime(0.04, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+      osc.start(now);
+      osc.stop(now + 0.125);
+    } else if (type === 'select') {
+      // High-resolution confirmation chime when selecting / navigating to cell
+      const osc1 = audioCtx.createOscillator();
+      const gain1 = audioCtx.createGain();
+      osc1.connect(gain1);
+      gain1.connect(audioCtx.destination);
+      osc1.type = 'triangle';
+      osc1.frequency.setValueAtTime(783.99, now); // G5
+      gain1.gain.setValueAtTime(0.05, now);
+      gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+      osc1.start(now);
+      osc1.stop(now + 0.095);
+
+      const osc2 = audioCtx.createOscillator();
+      const gain2 = audioCtx.createGain();
+      osc2.connect(gain2);
+      gain2.connect(audioCtx.destination);
+      osc2.type = 'sine';
+      osc2.frequency.setValueAtTime(1046.50, now + 0.08); // C6
+      gain2.gain.setValueAtTime(0.001, now);
+      gain2.gain.setValueAtTime(0.06, now + 0.08);
+      gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+      osc2.start(now + 0.08);
+      osc2.stop(now + 0.225);
+    } else if (type === 'open') {
+      // Quick subtle opening swoosh
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(520, now);
+      osc.frequency.exponentialRampToValueAtTime(680, now + 0.045);
+      gain.gain.setValueAtTime(0.035, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.055);
+      osc.start(now);
+      osc.stop(now + 0.06);
     }
   } catch {
     // Ignore audio context errors when user hasn't interacted yet
@@ -1112,4 +1200,130 @@ export function triggerCsvDownload(csvContent: string, filename: string) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+/**
+ * Constrói o CSV de Guia do Operador para Peças Fora do Lugar (Remanejamento).
+ * Indica de onde tirar, quantidade, SKU e onde guardar no cadastro oficial (ou S/Cadastro).
+ */
+export function buildOperatorMisplacedGuideCsv(
+  skus: SkuItem[],
+  barraItems: SkuItem[] = []
+): { csv: string; count: number } {
+  const headers = [
+    'ONDE_TIRAR_WMS',
+    'RUA_ORIGEM',
+    'POSICAO_ORIGEM',
+    'NIVEL_ORIGEM',
+    'QTD_PECAS_A_TIRAR',
+    'ONDE_GUARDAR_DESTINO',
+    'SKU_COMPLETO',
+    'CODIGO_PRODUTO',
+    'GRUPO',
+    'DESCRICAO_PRODUTO',
+    'COR',
+    'TAMANHO',
+    'COLECAO',
+    'INSTRUCAO_OPERADOR',
+    'STATUS_OPERACIONAL'
+  ];
+
+  const candidateItems = barraItems.length > 0 ? barraItems : skus;
+  const misplacedRows: {
+    wms: string;
+    rua: string;
+    pos: number;
+    nivel: number;
+    qty: number;
+    destino: string;
+    skuCode: string;
+    codigoBase: string;
+    grupo: string;
+    nome: string;
+    cor: string;
+    tam: string;
+    colecao: string;
+    instrucao: string;
+    status: string;
+  }[] = [];
+
+  const seenKeys = new Set<string>();
+
+  for (const item of candidateItems) {
+    if (item.isTransbordo) continue;
+
+    const rawCad = (item.localCadastroRaw || item.rawLocal || '').trim();
+    const hasNoCad = !rawCad || /^(sem\s*local|s\/?cadastro|s\/?local|null|undefined)$/i.test(rawCad);
+    const isOutside = Boolean(item.isOutsideRegisteredLocal || hasNoCad || (rawCad && !rawCad.includes(item.wms)));
+
+    if (!isOutside) continue;
+
+    const dec = decodeSkuPrefix(item.code, item.colorCode, item.size);
+    const codigoBase = item.codigoBase || dec.dMarca + dec.dEtiqueta + dec.dGrupo + dec.modelSeq;
+    const destinoLocal = hasNoCad ? 'S/Cadastro' : rawCad;
+    const qty = item.qtdForaDoLocal || item.qty || 1;
+    const dedupeKey = `${item.wms}|${codigoBase}|${dec.colorCode}|${dec.size}|${destinoLocal}`;
+
+    if (seenKeys.has(dedupeKey)) continue;
+    seenKeys.add(dedupeKey);
+
+    const instrucao = hasNoCad
+      ? `Retirar ${qty} pçs de ${item.wms} -> Item S/Cadastro: enviar para Triagem/Pulmão`
+      : `Retirar ${qty} pçs de ${item.wms} e guardar em ${destinoLocal}`;
+
+    const status = hasNoCad ? 'Sem Local de Cadastro' : 'Fora do Local Cadastrado';
+
+    misplacedRows.push({
+      wms: item.wms,
+      rua: item.rua,
+      pos: item.pos,
+      nivel: item.nivel,
+      qty,
+      destino: destinoLocal,
+      skuCode: item.code,
+      codigoBase,
+      grupo: dec.grupo,
+      nome: dec.autoName,
+      cor: `${dec.colorCode} - ${dec.colorName}`,
+      tam: dec.size,
+      colecao: item.colecao || '—',
+      instrucao,
+      status
+    });
+  }
+
+  // Ordena por Rua, Posição e Nível para criar rota lógica de corredor para o operador
+  misplacedRows.sort((a, b) => {
+    if (a.rua !== b.rua) return a.rua.localeCompare(b.rua);
+    if (a.pos !== b.pos) return a.pos - b.pos;
+    return a.nivel - b.nivel;
+  });
+
+  const lines = [headers.join(';')];
+  for (const r of misplacedRows) {
+    lines.push(
+      [
+        r.wms,
+        r.rua,
+        r.pos,
+        r.nivel,
+        r.qty,
+        `"${r.destino.replace(/"/g, '""')}"`,
+        `"${r.skuCode.replace(/"/g, '""')}"`,
+        r.codigoBase,
+        `"${r.grupo.replace(/"/g, '""')}"`,
+        `"${r.nome.replace(/"/g, '""')}"`,
+        `"${r.cor.replace(/"/g, '""')}"`,
+        r.tam,
+        r.colecao,
+        `"${r.instrucao.replace(/"/g, '""')}"`,
+        `"${r.status.replace(/"/g, '""')}"`
+      ].join(';')
+    );
+  }
+
+  return {
+    csv: lines.join('\r\n'),
+    count: misplacedRows.length
+  };
 }

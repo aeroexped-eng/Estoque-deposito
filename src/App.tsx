@@ -26,7 +26,9 @@ import {
   pickBestLevelsInColumn,
   getCanonicalSkuKey,
   formatCanonicalSkuDisplay,
-  decodeSkuPrefix
+  decodeSkuPrefix,
+  getHeatmapColorInfo,
+  HeatmapColorInfo
 } from './constants/wmsConstants';
 import {
   EMBEDDED_TRANSBORDO_DATA,
@@ -44,11 +46,13 @@ import {
   pushStateToCloud,
   generateCleanStandaloneHtml,
   triggerCsvDownload,
-  WmsPersistedSnapshot
+  WmsPersistedSnapshot,
+  buildOperatorMisplacedGuideCsv
 } from './utils/storageAndSync';
 import { ReportModal } from './components/ReportModal';
 import { InventoryAuditModal } from './components/InventoryAuditModal';
 import { AutoSaveModal } from './components/AutoSaveModal';
+import { MovementHistoryModal } from './components/MovementHistoryModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
 type WmsPerspective = 'sku' | 'barra';
@@ -89,6 +93,19 @@ export default function App() {
   const [collectionFilter, setCollectionFilter] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [mapMode, setMapMode] = useState<MapMode>('cards');
+  const [isHeatmapActive, setIsHeatmapActive] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('estoque_heatmap_active') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('estoque_heatmap_active', String(isHeatmapActive));
+    } catch {}
+  }, [isHeatmapActive]);
   const [highlightLowStockGreen, setHighlightLowStockGreen] = useState<boolean>(true);
   const [pulseAlertsEnabled, setPulseAlertsEnabled] = useState<boolean>(() => {
     try {
@@ -149,6 +166,7 @@ export default function App() {
   const [showReportModal, setShowReportModal] = useState<boolean>(false);
   const [showAuditModal, setShowAuditModal] = useState<boolean>(false);
   const [showAutoSaveModal, setShowAutoSaveModal] = useState<boolean>(false);
+  const [showMovementHistoryModal, setShowMovementHistoryModal] = useState<boolean>(false);
   const [isAutoSaveEnabled, setIsAutoSaveEnabled] = useState<boolean>(true);
   const [autoSaveIntervalSeconds, setAutoSaveIntervalSeconds] = useState<number>(120); // 2 minutos
   const [autoSaveCountdown, setAutoSaveCountdown] = useState<number>(120);
@@ -188,8 +206,32 @@ export default function App() {
   const [relocateMoveAllLevels, setRelocateMoveAllLevels] = useState<boolean>(true);
   const [relocateSelectedLevels, setRelocateSelectedLevels] = useState<number[]>([1]);
 
-  // Spotlight State
+  // Spotlight State & Audio Feedback
   const [spotlightQuery, setSpotlightQuery] = useState<string>('');
+  const [spotlightSelectedIndex, setSpotlightSelectedIndex] = useState<number>(0);
+  const [spotlightSoundEnabled, setSpotlightSoundEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('spotlight_sound_enabled');
+      return saved !== null ? saved === 'true' : true;
+    } catch {
+      return true;
+    }
+  });
+
+  const toggleSpotlightSound = useCallback(() => {
+    setSpotlightSoundEnabled(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem('spotlight_sound_enabled', String(next));
+      } catch {
+        // Ignore storage error
+      }
+      if (next && soundEnabled) {
+        playMacSound('search', true);
+      }
+      return next;
+    });
+  }, [soundEnabled]);
 
   // Cloud Sync & HTML Generator State
   const [cloudSyncUrl, setCloudSyncUrl] = useState<string>(() => getSavedCloudSyncUrl());
@@ -749,6 +791,36 @@ export default function App() {
     return STREETS.filter(r => !isAccessoriesStreet(r) && !isPulmaoStreet(r));
   }, [macroSectorFilter]);
 
+  // Heatmap metrics and ranking for Ruas RA a RH
+  const heatmapData = useMemo(() => {
+    const generalStreets = ['RA', 'RB', 'RC', 'RD', 'RE', 'RF', 'RG', 'RH'];
+    const streetHeats = generalStreets.map(r => {
+      const st = streetStats.byStreet[r] || { total: 0, occupied: 0, free: 0, conflicts: 0, transbordo: 0, pct: 0 };
+      const heat = getHeatmapColorInfo(st.pct);
+      return {
+        rua: r,
+        stats: st,
+        heat
+      };
+    });
+
+    // Sorted by occupancy rate descending (critical first)
+    const sortedByOccupancy = [...streetHeats].sort((a, b) => b.stats.pct - a.stats.pct);
+
+    const criticalStreets = streetHeats.filter(s => s.heat.isCritical);
+    const hotStreets = streetHeats.filter(s => s.stats.pct >= 70 && s.stats.pct < 88);
+    const normalStreets = streetHeats.filter(s => s.stats.pct < 70);
+
+    return {
+      streetHeats,
+      sortedByOccupancy,
+      criticalStreets,
+      hotStreets,
+      normalStreets,
+      selectedStreetHeat: getHeatmapColorInfo(streetStats.byStreet[selectedStreet]?.pct || 0)
+    };
+  }, [streetStats, selectedStreet]);
+
   // Helper to get all sibling items of a SKU
   const getSkuMultiLevelInfo = useCallback(
     (skuItem: SkuItem) => {
@@ -794,6 +866,10 @@ export default function App() {
         return { nextMoved, staysMoved: false };
       }
 
+      const now = new Date();
+      const ruaOrigem = sku.rua || baselineLocal.split('.')[0] || '—';
+      const ruaDestino = newLocalStr.split('.')[0] || '—';
+
       nextMoved[skuKey] = {
         skuKey,
         code: sku.code,
@@ -803,9 +879,13 @@ export default function App() {
         deposito: sku.deposito || '2',
         oldLocal: baselineLocal,
         newLocal: newLocalStr,
-        movedAt: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+        movedAt: now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        timestamp: now.getTime(),
         source,
-        name: sku.name || dec.autoName
+        name: sku.name || dec.autoName,
+        qty: sku.qty || 0,
+        ruaOrigem,
+        ruaDestino
       };
       return { nextMoved, staysMoved: true };
     },
@@ -1796,24 +1876,22 @@ export default function App() {
   };
 
   const exportBarraInvadersGuideCsv = () => {
-    const invaders = barraItems.filter(b => b.isOutsideRegisteredLocal);
-    if (invaders.length === 0) {
+    const res = buildOperatorMisplacedGuideCsv(skus, barraItems);
+    if (res.count === 0) {
       playMacSound('alert', soundEnabled);
-      showToast('Sem SKUs Invasores', 'Nenhuma peça fora do local cadastrado na Aba Barra.', '✅');
+      showToast('Estoque Conforme', 'Nenhuma peça fora do local cadastrado encontrada.', '✅');
       return;
     }
-    const lines = ['CAIXA_ONDE_ESTA_AGORA;SKU_INVASOR;QTD_PECAS;GUARDAR_NO_LOCAL_CADASTRADO'];
-    for (const inv of invaders) {
-      lines.push(
-        `${inv.wms};${inv.code};${inv.qtdForaDoLocal || inv.qty || 1};${inv.localCadastroRaw || inv.rawLocal}`
-      );
-    }
     triggerCsvDownload(
-      lines.join('\n'),
-      `guia_operador_skus_invasores_${new Date().toISOString().slice(0, 10)}.csv`
+      res.csv,
+      `guia_operador_onde_tirar_e_guardar_${new Date().toISOString().slice(0, 10)}.csv`
     );
     playMacSound('success', soundEnabled);
-    showToast('Guia do Operador Exportado', `${invaders.length} desvios listados para correção.`, '📋');
+    showToast(
+      'Guia do Operador Exportado',
+      `${res.count} peças fora do lugar mapeadas (com indicação S/Cadastro).`,
+      '🚚'
+    );
   };
 
   // ============================================================================
@@ -1927,10 +2005,21 @@ export default function App() {
         setShowCloudModal(false);
         setShowSpotlight(false);
         setShowAboutModal(false);
+        setShowReportModal(false);
+        setShowAuditModal(false);
+        setShowAutoSaveModal(false);
+        setShowMovementHistoryModal(false);
         setOpenMenu(null);
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
-        setShowSpotlight(prev => !prev);
+        setShowSpotlight(prev => {
+          const next = !prev;
+          if (next) {
+            playMacSound('open', soundEnabled && spotlightSoundEnabled);
+            setSpotlightSelectedIndex(0);
+          }
+          return next;
+        });
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o') {
         e.preventDefault();
         setShowImportModal(true);
@@ -1948,6 +2037,126 @@ export default function App() {
 
   const movedCount = Object.keys(movedSkusRegistry).length;
   const transbordoCount = Object.keys(transbordoRegistry).length;
+
+  // Memoized Spotlight search items
+  const filteredSpotlightItems = useMemo(() => {
+    const q = spotlightQuery.trim().toUpperCase();
+    const sourcePool = wmsPerspective === 'barra' && barraItems.length > 0 ? barraItems : skus;
+    if (!q) {
+      return sourcePool.slice(0, 30);
+    }
+    return sourcePool
+      .filter(s => {
+        return (
+          s.code.toUpperCase().includes(q) ||
+          s.wms.toUpperCase().includes(q) ||
+          s.name.toUpperCase().includes(q) ||
+          (s.rua && s.rua.toUpperCase().includes(q)) ||
+          (s.groupName && s.groupName.toUpperCase().includes(q)) ||
+          (s.colorName && s.colorName.toUpperCase().includes(q)) ||
+          (s.size && s.size.toUpperCase() === q) ||
+          (s.colecao && s.colecao.toUpperCase().includes(q))
+        );
+      })
+      .slice(0, 50);
+  }, [spotlightQuery, skus, barraItems, wmsPerspective]);
+
+  // Audio confirmation when results are updated / viewed in Spotlight
+  const prevSpotlightQueryRef = useRef<string>('');
+  useEffect(() => {
+    if (!showSpotlight) {
+      prevSpotlightQueryRef.current = '';
+      return;
+    }
+    const q = spotlightQuery.trim();
+    if (!q) {
+      prevSpotlightQueryRef.current = '';
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (q !== prevSpotlightQueryRef.current) {
+        prevSpotlightQueryRef.current = q;
+        if (filteredSpotlightItems.length > 0) {
+          playMacSound('search', soundEnabled && spotlightSoundEnabled);
+        } else {
+          playMacSound('empty', soundEnabled && spotlightSoundEnabled);
+        }
+      }
+    }, 240);
+
+    return () => clearTimeout(timer);
+  }, [spotlightQuery, showSpotlight, soundEnabled, spotlightSoundEnabled, filteredSpotlightItems.length]);
+
+  const executeSpotlightSelection = useCallback((s: SkuItem) => {
+    selectStreet(s.rua);
+    setSelectedAddressKey(s.wms);
+    setSelectedSkuId(s.id);
+    setSelectedRangeId('ALL-OCCUPIED');
+    setShowSpotlight(false);
+    playMacSound('select', soundEnabled && spotlightSoundEnabled);
+    showToast('Endereço Localizado', `${s.code} em ${s.wms} (${s.rua})`, '📍');
+  }, [selectStreet, setSelectedAddressKey, setSelectedSkuId, setSelectedRangeId, soundEnabled, spotlightSoundEnabled, showToast]);
+
+  // Movement History Handlers
+  const handleNavigateFromHistory = useCallback((wms: string, rua: string) => {
+    setShowMovementHistoryModal(false);
+    setSelectedStreet(rua);
+    const parts = wms.split('.');
+    const pos = parseInt(parts[1], 10);
+    if (!isNaN(pos)) {
+      if (pos >= 1 && pos <= 20) setSelectedRangeId('1-20');
+      else if (pos >= 21 && pos <= 40) setSelectedRangeId('21-40');
+      else if (pos >= 41 && pos <= 60) setSelectedRangeId('41-60');
+      else if (pos >= 61 && pos <= 80) setSelectedRangeId('61-80');
+      else if (pos >= 81 && pos <= 100) setSelectedRangeId('81-100');
+      else if (pos >= 101 && pos <= 120) setSelectedRangeId('101-120');
+      else if (pos >= 121 && pos <= 140) setSelectedRangeId('121-140');
+      else setSelectedRangeId('ALL-OCCUPIED');
+    }
+    setSelectedAddressKey(wms);
+    const items = addressMap.get(wms) || [];
+    if (items[0]) setSelectedSkuId(items[0].id);
+    setInspectorOpenMobile(true);
+    setInspectorCollapsedDesktop(false);
+    showToast(`Endereço ${wms} Selecionado`, `Localizado na Rua ${rua}.`, '🎯');
+  }, [addressMap, showToast]);
+
+  const handleRevertMovement = useCallback((skuKey: string) => {
+    const entry = movedSkusRegistry[skuKey];
+    if (!entry) return;
+
+    const nextSkus = skus.map(s => {
+      if (getCanonicalSkuKey(s.code) === skuKey) {
+        const expanded = expandSisplanLocal(entry.oldLocal);
+        const first = expanded[0] || { rua: s.rua, pos: s.pos, nivel: s.nivel, wms: entry.oldLocal };
+        return {
+          ...s,
+          rua: first.rua,
+          pos: first.pos,
+          nivel: first.nivel,
+          wms: first.wms,
+          rawLocal: entry.oldLocal
+        };
+      }
+      return s;
+    });
+
+    const nextMoved = { ...movedSkusRegistry };
+    delete nextMoved[skuKey];
+
+    setSkus(nextSkus);
+    setMovedSkusRegistry(nextMoved);
+    persistCurrentState(nextSkus, nextMoved, transbordoRegistry);
+    playMacSound('pop', soundEnabled);
+    showToast('Movimento Revertido', `${entry.code} restaurado para ${entry.oldLocal}.`, '↩️');
+  }, [movedSkusRegistry, skus, transbordoRegistry, soundEnabled, showToast]);
+
+  const handleClearMovedHistory = useCallback(() => {
+    setMovedSkusRegistry({});
+    persistCurrentState(skus, {}, transbordoRegistry);
+    playMacSound('pop', soundEnabled);
+    showToast('Histórico de Movimentos Limpo', 'Registro zerado com sucesso.', '🧹');
+  }, [skus, transbordoRegistry, soundEnabled, showToast]);
 
   return (
     <div
@@ -2144,6 +2353,22 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     setOpenMenu(null);
+                    setShowMovementHistoryModal(true);
+                  }}
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex justify-between text-blue-600 dark:text-blue-400 font-bold"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>🚚</span>
+                    <span>Histórico de Movimentações (De ➔ Para)</span>
+                  </span>
+                  <span className="font-mono text-[9px] px-1.5 py-0.2 rounded-full bg-blue-500/20 text-blue-600 dark:text-blue-400 font-extrabold">
+                    {movedCount}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpenMenu(null);
                     exportDraggedChangesCsv(false);
                   }}
                   className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-purple-600 hover:text-white transition flex justify-between text-purple-600 dark:text-purple-400 font-bold"
@@ -2168,10 +2393,11 @@ export default function App() {
                     setOpenMenu(null);
                     exportBarraInvadersGuideCsv();
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-rose-600 hover:text-white transition flex justify-between text-rose-600 dark:text-rose-400 font-bold"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-emerald-600 hover:text-white transition flex justify-between text-emerald-600 dark:text-emerald-400 font-bold"
+                  title="Exportar roteiro passo a passo com onde tirar, quantidade e onde guardar (ou S/Cadastro)"
                 >
-                  <span>🚨 Guia Operador: SKUs Invasores (.CSV)</span>
-                  <span className="font-mono text-[10px] opacity-80">BARRA</span>
+                  <span>🚚 Guia do Operador: Onde Tirar ➔ Onde Guardar (.CSV)</span>
+                  <span className="font-mono text-[10px] opacity-85">ROTEIRO</span>
                 </button>
                 <div className="border-t border-black/10 dark:border-white/10 my-1" />
                 <button
@@ -2326,6 +2552,22 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     setOpenMenu(null);
+                    exportBarraInvadersGuideCsv();
+                  }}
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-emerald-600 hover:text-white transition flex items-center justify-between font-bold text-emerald-600 dark:text-emerald-400"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>🚚</span>
+                    <span>Guia do Operador (.CSV)</span>
+                  </span>
+                  <span className="font-mono text-[9px] px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 font-extrabold">
+                    Onde Tirar / Guardar
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpenMenu(null);
                     setShowAutoSaveModal(true);
                   }}
                   className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between text-blue-600 dark:text-blue-400 font-semibold"
@@ -2335,6 +2577,85 @@ export default function App() {
                     <span>Status do Auto-Salvamento</span>
                   </span>
                   <span className="font-mono text-[10px] opacity-75">{Math.floor(autoSaveCountdown / 60)}m {autoSaveCountdown % 60}s</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpenMenu(null);
+                    setShowMovementHistoryModal(true);
+                  }}
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between font-bold text-blue-600 dark:text-blue-400"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>🚚</span>
+                    <span>Histórico de Movimentações</span>
+                  </span>
+                  <span className="font-mono text-[9px] px-1.5 py-0.2 rounded-full bg-blue-500/20 text-blue-600 dark:text-blue-400 font-extrabold">
+                    {movedCount}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpenMenu(null);
+                    setIsHeatmapActive(h => {
+                      const next = !h;
+                      playMacSound(next ? 'search' : 'pop', soundEnabled);
+                      showToast(
+                        next ? 'Modo Heatmap Ativado' : 'Modo Heatmap Desativado',
+                        next ? 'Cores do fundo proporcionais à taxa de ocupação das ruas RA–RH.' : 'Retornando à paleta padrão.',
+                        next ? '🔥' : '🗺️'
+                      );
+                      return next;
+                    });
+                  }}
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between font-bold text-orange-600 dark:text-orange-400"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>🔥</span>
+                    <span>Modo Heatmap (Mapa de Calor)</span>
+                  </span>
+                  <span className={`font-mono text-[9px] px-1.5 py-0.2 rounded-full font-bold ${
+                    isHeatmapActive
+                      ? 'bg-orange-500/20 text-orange-600 dark:text-orange-300 ring-1 ring-orange-500/40'
+                      : 'bg-black/10 dark:bg-white/10 text-slate-400'
+                  }`}>
+                    {isHeatmapActive ? 'Ativado' : 'Desativado'}
+                  </span>
+                </button>
+                <div className="border-t border-black/10 dark:border-white/10 my-1" />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpenMenu(null);
+                    setShowSpotlight(true);
+                    setSpotlightSelectedIndex(0);
+                    playMacSound('open', soundEnabled && spotlightSoundEnabled);
+                  }}
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>🔍</span>
+                    <span>Buscar no Spotlight</span>
+                  </span>
+                  <span className="font-mono text-[10px] opacity-75">⌘K</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    toggleSpotlightSound();
+                  }}
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between text-xs"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>{soundEnabled && spotlightSoundEnabled ? '🔊' : '🔇'}</span>
+                    <span>Feedback Sonoro (Spotlight)</span>
+                  </span>
+                  <span className={`font-mono text-[9px] px-1.5 py-0.2 rounded-full font-bold ${
+                    soundEnabled && spotlightSoundEnabled ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-400' : 'bg-black/10 dark:bg-white/10 text-slate-400'
+                  }`}>
+                    {soundEnabled && spotlightSoundEnabled ? 'Ativado' : 'Mudo'}
+                  </span>
                 </button>
                 <div className="border-t border-black/10 dark:border-white/10 my-1" />
                 <button
@@ -2407,13 +2728,30 @@ export default function App() {
 
             <button
               type="button"
-              onClick={() => setShowSpotlight(true)}
+              onClick={() => {
+                setShowSpotlight(true);
+                setSpotlightSelectedIndex(0);
+                playMacSound('open', soundEnabled && spotlightSoundEnabled);
+              }}
               className="flex items-center space-x-1 hover:bg-black/10 dark:hover:bg-white/15 px-2 py-0.5 rounded transition"
               title="Spotlight Search (⌘K)"
             >
               <span>🔍</span>
               <span className="hidden md:inline text-[11px] opacity-80">Spotlight</span>
             </button>
+
+            {movedCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowMovementHistoryModal(true)}
+                className="flex items-center space-x-1.5 px-2 py-0.5 rounded-md bg-blue-500/15 hover:bg-blue-500/25 border border-blue-500/30 text-blue-700 dark:text-blue-300 font-bold text-xs transition animate-in fade-in"
+                title={`Ver Histórico de ${movedCount} Movimentações Realizadas`}
+              >
+                <span>🚚</span>
+                <span className="font-mono">{movedCount}</span>
+                <span className="hidden xl:inline text-[11px]">Movimentos</span>
+              </button>
+            )}
 
             <button
               type="button"
@@ -2568,7 +2906,7 @@ export default function App() {
 
             {/* Action Toolbar */}
             <div className="flex items-center space-x-1.5">
-              <div className="flex bg-black/10 dark:bg-white/10 p-0.5 rounded-lg text-xs">
+              <div className="flex bg-black/10 dark:bg-white/10 p-0.5 rounded-lg text-xs items-center gap-0.5">
                 <button
                   type="button"
                   onClick={() => setMapMode('cards')}
@@ -2590,6 +2928,33 @@ export default function App() {
                   }`}
                 >
                   🏢 Porta-Paletes
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsHeatmapActive(h => {
+                      const next = !h;
+                      playMacSound(next ? 'search' : 'pop', soundEnabled);
+                      showToast(
+                        next ? 'Modo Heatmap Ativado' : 'Modo Heatmap Desativado',
+                        next ? 'Cores de fundo térmicas proporcionais à taxa de ocupação.' : 'Retornando à paleta padrão.',
+                        next ? '🔥' : '🗺️'
+                      );
+                      return next;
+                    });
+                  }}
+                  className={`px-2.5 py-1 rounded-md font-bold transition flex items-center space-x-1 ${
+                    isHeatmapActive
+                      ? 'bg-gradient-to-r from-orange-500 to-rose-600 text-white shadow-md shadow-orange-500/25 ring-1 ring-white/30'
+                      : 'hover:bg-black/5 dark:hover:bg-white/10 text-orange-600 dark:text-orange-400'
+                  }`}
+                  title="Ativar/Desativar Mapa de Calor Térmico de Ocupação das Ruas RA–RH"
+                >
+                  <span>🔥</span>
+                  <span>Heatmap</span>
+                  {isHeatmapActive && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-yellow-300 animate-ping inline-block" />
+                  )}
                 </button>
               </div>
 
@@ -2668,11 +3033,12 @@ export default function App() {
               {movedCount > 0 && (
                 <button
                   type="button"
-                  onClick={() => exportDraggedChangesCsv(false)}
-                  className="px-2.5 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-semibold text-xs shadow-sm transition flex items-center space-x-1"
+                  onClick={() => setShowMovementHistoryModal(true)}
+                  className="px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow-sm transition flex items-center space-x-1"
+                  title="Abrir Histórico de Movimentações e Relatórios CSV (De ➔ Para)"
                 >
-                  <span>✋</span>
-                  <span className="hidden sm:inline">Exportar Arraste</span>
+                  <span>🚚</span>
+                  <span className="hidden sm:inline">Histórico de Movimentos</span>
                   <span className="px-1.5 py-0.2 rounded-full bg-white/25 text-white font-mono text-[10px] font-extrabold">
                     {movedCount}
                   </span>
@@ -2789,6 +3155,7 @@ export default function App() {
                   const isCol35 = isReservedCol35Street(rua);
                   const isAcc = isAccessoriesStreet(rua);
                   const isPul = isPulmaoStreet(rua);
+                  const heat = getHeatmapColorInfo(st.pct);
 
                   return (
                     <button
@@ -2804,60 +3171,67 @@ export default function App() {
                         e.preventDefault();
                         handleDropOnStreet(rua);
                       }}
-                      title={meta.desc}
+                      title={`${meta.desc} • ${st.pct}% ocupado (${heat.label})`}
+                      style={isHeatmapActive ? heat.cardBgStyle : undefined}
                       className={`mac-card rounded-xl p-2 text-left transition flex flex-col justify-between shrink-0 w-24 sm:w-auto ${
                         dragOverKey === `STREET:${rua}` ? 'ring-2 ring-purple-500 scale-105' : ''
                       } ${
-                        isSelected
-                          ? isCol35
-                            ? 'ring-2 ring-amber-500 bg-amber-500/15'
-                            : isAcc
-                              ? 'ring-2 ring-cyan-500 bg-cyan-500/15'
-                              : isPul
-                                ? 'ring-2 ring-indigo-500 bg-indigo-500/15'
-                                : 'ring-2 ring-mac-blue bg-mac-blue/15'
-                          : isCol35
-                            ? 'bg-amber-500/5 border-amber-500/30'
-                            : ''
+                        isHeatmapActive
+                          ? `${heat.borderClass} ${isSelected ? 'ring-2 ring-white shadow-xl scale-102 font-bold' : ''}`
+                          : isSelected
+                            ? isCol35
+                              ? 'ring-2 ring-amber-500 bg-amber-500/15'
+                              : isAcc
+                                ? 'ring-2 ring-cyan-500 bg-cyan-500/15'
+                                : isPul
+                                  ? 'ring-2 ring-indigo-500 bg-indigo-500/15'
+                                  : 'ring-2 ring-mac-blue bg-mac-blue/15'
+                            : isCol35
+                              ? 'bg-amber-500/5 border-amber-500/30'
+                              : ''
                       }`}
                     >
                       <div className="flex items-center justify-between gap-1">
                         <span
                           className={`font-display font-extrabold text-xs ${
-                            isCol35
-                              ? 'text-amber-600 dark:text-amber-300'
-                              : isAcc
-                                ? 'text-cyan-600 dark:text-cyan-300'
-                                : isPul
-                                  ? 'text-indigo-600 dark:text-indigo-300'
-                                  : 'text-mac-blue'
+                            isHeatmapActive
+                              ? 'text-slate-900 dark:text-white'
+                              : isCol35
+                                ? 'text-amber-600 dark:text-amber-300'
+                                : isAcc
+                                  ? 'text-cyan-600 dark:text-cyan-300'
+                                  : isPul
+                                    ? 'text-indigo-600 dark:text-indigo-300'
+                                    : 'text-mac-blue'
                           }`}
                         >
                           {rua} {isCol35 ? '★' : isAcc ? '🧣' : isPul ? '📦' : ''}
                         </span>
-                        <span className="font-mono text-[9px] px-1.5 py-0.5 rounded truncate bg-black/10 dark:bg-white/10 text-slate-500 dark:text-slate-300">
-                          {meta.badge}
+                        <span className="font-mono text-[9px] px-1.5 py-0.5 rounded truncate bg-black/10 dark:bg-white/10 text-slate-500 dark:text-slate-300 font-semibold">
+                          {isHeatmapActive ? `${heat.badgeEmoji} ${st.pct}%` : meta.badge}
                         </span>
                       </div>
                       <div className="mt-1.5">
                         <div className="flex justify-between items-center text-[10px] font-mono">
-                          <span className="text-slate-500 dark:text-slate-400">
+                          <span className={isHeatmapActive ? 'text-slate-800/80 dark:text-slate-200/80 font-bold' : 'text-slate-500 dark:text-slate-400'}>
                             {st.occupied}/{st.total}
                           </span>
-                          <span className="font-bold text-emerald-600 dark:text-emerald-400">
+                          <span className={`font-black ${isHeatmapActive ? heat.textClass : 'text-emerald-600 dark:text-emerald-400'}`}>
                             {st.pct}%
                           </span>
                         </div>
-                        <div className="w-full h-1.5 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden mt-1">
+                        <div className="w-full h-1.5 rounded-full bg-black/10 dark:bg-white/15 overflow-hidden mt-1">
                           <div
-                            className={`h-full rounded-full ${
-                              isCol35
-                                ? 'bg-amber-500'
-                                : isAcc
-                                  ? 'bg-cyan-500'
-                                  : isPul
-                                    ? 'bg-indigo-500'
-                                    : 'bg-mac-blue'
+                            className={`h-full rounded-full transition-all duration-300 ${
+                              isHeatmapActive
+                                ? heat.barGradient
+                                : isCol35
+                                  ? 'bg-amber-500'
+                                  : isAcc
+                                    ? 'bg-cyan-500'
+                                    : isPul
+                                      ? 'bg-indigo-500'
+                                      : 'bg-mac-blue'
                             }`}
                             style={{ width: `${st.pct}%` }}
                           />
@@ -3416,7 +3790,115 @@ export default function App() {
               )}
 
               {/* Scrollable Map Grid */}
-              <div className="flex-1 overflow-y-auto p-3.5 pb-24 lg:pb-3.5">
+              <div
+                className={`flex-1 overflow-y-auto p-3.5 pb-24 lg:pb-3.5 transition-colors duration-500 ${
+                  isHeatmapActive ? 'relative' : ''
+                }`}
+                style={isHeatmapActive ? heatmapData.selectedStreetHeat.mapBgStyle : undefined}
+              >
+                {/* Heatmap Status & Critical Areas HUD */}
+                {isHeatmapActive && (
+                  <div className="mb-3.5 p-3 sm:p-4 rounded-2xl bg-white/85 dark:bg-slate-900/85 backdrop-blur-md border border-orange-500/35 shadow-xl space-y-2.5 animate-in fade-in duration-200">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center space-x-2.5">
+                        <div className="w-8 h-8 rounded-xl bg-orange-500/20 text-orange-600 dark:text-orange-300 flex items-center justify-center text-lg font-bold shrink-0">
+                          🔥
+                        </div>
+                        <div>
+                          <div className="flex items-center space-x-2 flex-wrap">
+                            <h4 className="font-display font-extrabold text-xs sm:text-sm text-slate-800 dark:text-slate-100">
+                              Mapa de Calor Térmico • Rua {selectedStreet} ({heatmapData.selectedStreetHeat.pct}% Ocupada)
+                            </h4>
+                            <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border ${heatmapData.selectedStreetHeat.badgeClass}`}>
+                              {heatmapData.selectedStreetHeat.badgeEmoji} {heatmapData.selectedStreetHeat.label}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                            Fundo visual térmico proporcional à saturação de cada rua (RA a RH) para rápida identificação de gargalos.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        {heatmapData.selectedStreetHeat.isCritical && (
+                          <span className="px-2.5 py-1 rounded-xl bg-rose-500/20 text-rose-700 dark:text-rose-300 border border-rose-500/40 text-[11px] font-extrabold flex items-center gap-1.5 animate-pulse">
+                            <span>🚨</span>
+                            <span>Atenção: Sobrecarga na Rua {selectedStreet}!</span>
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsHeatmapActive(false);
+                            playMacSound('pop', soundEnabled);
+                          }}
+                          className="px-2.5 py-1 rounded-xl bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/15 text-slate-600 dark:text-slate-300 text-xs font-semibold transition"
+                          title="Voltar ao modo padrão"
+                        >
+                          ✕ Ocultar Heatmap
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Scale Spectrum Bar */}
+                    <div className="space-y-1">
+                      <div className="h-2 rounded-full w-full bg-gradient-to-r from-blue-500 via-emerald-500 via-amber-400 via-orange-500 to-rose-600 shadow-inner" />
+                      <div className="flex justify-between items-center text-[9px] font-mono font-bold text-slate-500 dark:text-slate-400">
+                        <span>0% ❄️ Livre</span>
+                        <span>25% 🟢 Baixa</span>
+                        <span>50% 🟡 Média</span>
+                        <span>75% 🔥 Alta</span>
+                        <span>100% 🚨 Crítica</span>
+                      </div>
+                    </div>
+
+                    {/* Quick Street Jump Strip (RA a RH) ranked by occupancy */}
+                    <div className="pt-2 border-t border-black/5 dark:border-white/5">
+                      <div className="flex items-center justify-between text-[10px] font-bold text-slate-600 dark:text-slate-300 mb-1.5">
+                        <span className="flex items-center gap-1">
+                          <span>📍</span>
+                          <span>Taxa de Ocupação por Rua (Clique para Navegar):</span>
+                        </span>
+                        <span className="font-mono text-slate-400 text-[10px]">
+                          {heatmapData.criticalStreets.length} crítica(s) • {heatmapData.hotStreets.length} alta(s)
+                        </span>
+                      </div>
+
+                      <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-1">
+                        {heatmapData.sortedByOccupancy.map(({ rua, stats, heat }) => {
+                          const isCur = selectedStreet === rua;
+                          return (
+                            <button
+                              key={rua}
+                              type="button"
+                              onClick={() => {
+                                selectStreet(rua);
+                                playMacSound('pop', soundEnabled);
+                              }}
+                              className={`px-2.5 py-1.5 rounded-xl border text-left transition flex items-center gap-2 shrink-0 ${
+                                heat.borderClass
+                              } ${
+                                isCur
+                                  ? 'ring-2 ring-white dark:ring-slate-100 shadow-md scale-105 font-bold'
+                                  : 'hover:scale-102 opacity-90 hover:opacity-100'
+                              }`}
+                              style={heat.cardBgStyle}
+                              title={`Navegar para Rua ${rua} (${stats.pct}% ocupada • ${stats.occupied}/${stats.total})`}
+                            >
+                              <span className="font-mono font-black text-xs text-slate-900 dark:text-white">
+                                Rua {rua}
+                              </span>
+                              <span className={`font-mono font-extrabold text-[11px] ${heat.textClass}`}>
+                                {stats.pct}%
+                              </span>
+                              <span className="text-xs">{heat.badgeEmoji}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                )}
                 {filteredViewData.slots.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center text-center p-8">
                     <div className="w-14 h-14 rounded-2xl bg-mac-blue/15 text-mac-blue flex items-center justify-center text-3xl mb-3">
@@ -4976,6 +5458,25 @@ export default function App() {
                 type="button"
                 onClick={() => {
                   setIsMinimized(false);
+                  setIsHeatmapActive(h => {
+                    const next = !h;
+                    playMacSound(next ? 'search' : 'pop', soundEnabled);
+                    return next;
+                  });
+                }}
+                className={`dock-item w-10 h-10 rounded-xl flex items-center justify-center text-lg shadow-lg text-white transition ${
+                  isHeatmapActive
+                    ? 'bg-gradient-to-b from-orange-500 to-rose-600 ring-2 ring-white scale-110 shadow-orange-500/50'
+                    : 'bg-gradient-to-b from-amber-500 to-orange-700'
+                }`}
+                title="Modo Heatmap (Mapa de Calor Térmico de Ocupação)"
+              >
+                🔥
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsMinimized(false);
                   selectStreet('RF');
                 }}
                 className="dock-item w-10 h-10 rounded-xl bg-gradient-to-b from-amber-400 to-orange-600 flex items-center justify-center text-lg shadow-lg text-white"
@@ -5966,61 +6467,203 @@ export default function App() {
       {showSpotlight && (
         <div
           onClick={() => setShowSpotlight(false)}
-          className="fixed inset-0 bg-black/40 backdrop-blur-xs z-50 flex items-start justify-center pt-20 p-4"
+          className="fixed inset-0 bg-black/45 backdrop-blur-xs z-50 flex items-start justify-center pt-16 p-4 animate-in fade-in duration-150"
         >
           <div
             onClick={e => e.stopPropagation()}
-            className="mac-window mac-sheet w-full max-w-xl rounded-2xl overflow-hidden shadow-2xl border border-white/25"
+            className="mac-window mac-sheet w-full max-w-2xl rounded-2xl overflow-hidden shadow-2xl border border-white/25 flex flex-col max-h-[85vh]"
           >
-            <div className="px-4 py-3 flex items-center space-x-3 border-b border-black/10 dark:border-white/10">
-              <span className="text-xl text-mac-blue">🔍</span>
+            {/* Spotlight Header Bar */}
+            <div className="px-4 py-3 flex items-center space-x-3 border-b border-black/10 dark:border-white/10 bg-white/40 dark:bg-black/30 backdrop-blur-md">
+              <span className="text-xl text-mac-blue select-none">🔍</span>
               <input
                 type="text"
                 autoFocus
                 value={spotlightQuery}
-                onChange={e => setSpotlightQuery(e.target.value)}
-                placeholder="Spotlight WMS: Digite um endereço (ex: RG.015.2) ou SKU..."
-                className="w-full bg-transparent text-base font-medium focus:outline-none"
+                onChange={e => {
+                  setSpotlightQuery(e.target.value);
+                  setSpotlightSelectedIndex(0);
+                }}
+                onKeyDown={e => {
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    setSpotlightSelectedIndex(prev => (prev + 1) % Math.max(1, filteredSpotlightItems.length));
+                  } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    setSpotlightSelectedIndex(prev => (prev - 1 + filteredSpotlightItems.length) % Math.max(1, filteredSpotlightItems.length));
+                  } else if (e.key === 'Enter') {
+                    e.preventDefault();
+                    if (filteredSpotlightItems[spotlightSelectedIndex]) {
+                      executeSpotlightSelection(filteredSpotlightItems[spotlightSelectedIndex]);
+                    }
+                  } else if (e.key === 'Escape') {
+                    setShowSpotlight(false);
+                  }
+                }}
+                placeholder="Spotlight WMS: Digite SKU (ex: 11060127), endereço (ex: RG.015.2), cor ou nome..."
+                className="w-full bg-transparent text-sm sm:text-base font-medium focus:outline-none placeholder:text-slate-400"
               />
-              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-black/10 dark:bg-white/10 text-slate-400">
+
+              {/* Sound Feedback Toggle Button */}
+              <button
+                type="button"
+                onClick={toggleSpotlightSound}
+                className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition border shrink-0 ${
+                  soundEnabled && spotlightSoundEnabled
+                    ? 'bg-emerald-500/15 border-emerald-500/35 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/25'
+                    : 'bg-black/5 dark:bg-white/10 border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-200'
+                }`}
+                title={
+                  soundEnabled && spotlightSoundEnabled
+                    ? 'Feedback sonoro ativado (som ao listar resultados e selecionar). Clique para silenciar.'
+                    : 'Feedback sonoro desligado. Clique para ativar som nas buscas do Spotlight.'
+                }
+              >
+                <span>{soundEnabled && spotlightSoundEnabled ? '🔊' : '🔇'}</span>
+                <span className="hidden sm:inline">
+                  {soundEnabled && spotlightSoundEnabled ? 'Som Ativo' : 'Silencioso'}
+                </span>
+              </button>
+
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-black/10 dark:bg-white/10 text-slate-500 dark:text-slate-400 font-bold select-none shrink-0">
                 ESC
               </span>
             </div>
-            <div className="max-h-80 overflow-y-auto p-2 divide-y divide-black/5 dark:divide-white/5 text-xs">
-              {skus
-                .filter(s => {
-                  const q = spotlightQuery.trim().toUpperCase();
-                  if (!q) return true;
+
+            {/* Results List */}
+            <div className="flex-1 overflow-y-auto p-2 divide-y divide-black/5 dark:divide-white/5 text-xs">
+              {filteredSpotlightItems.length === 0 ? (
+                <div className="py-12 px-4 text-center text-slate-400">
+                  <div className="text-3xl mb-2">🔍</div>
+                  <p className="font-semibold text-sm text-slate-600 dark:text-slate-300">
+                    Nenhum resultado encontrado para "{spotlightQuery}"
+                  </p>
+                  <p className="text-xs mt-1 text-slate-400">
+                    Tente buscar por código SKU (ex: 11060127), endereço de colmeia (ex: RG.015.2), cor ou nome de peça.
+                  </p>
+                  {soundEnabled && spotlightSoundEnabled && (
+                    <div className="mt-3 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] bg-slate-500/10 text-slate-500 font-mono">
+                      <span>🔇</span> Tom de 0 resultados emitido
+                    </div>
+                  )}
+                </div>
+              ) : (
+                filteredSpotlightItems.map((s, idx) => {
+                  const isSelected = idx === spotlightSelectedIndex;
+                  const hasConflict = conflictAnalysis.allConflictSlots.has(s.wms);
+                  const isInvader = s.isOutsideRegisteredLocal || conflictAnalysis.invaderSlots.has(s.wms);
+
                   return (
-                    s.code.toUpperCase().includes(q) ||
-                    s.wms.toUpperCase().includes(q) ||
-                    s.name.toUpperCase().includes(q)
+                    <button
+                      key={`${s.id}-${idx}`}
+                      type="button"
+                      onMouseEnter={() => setSpotlightSelectedIndex(idx)}
+                      onClick={() => executeSpotlightSelection(s)}
+                      className={`w-full px-3 py-2.5 text-left rounded-xl transition flex items-center justify-between gap-3 group ${
+                        isSelected
+                          ? 'bg-mac-blue text-white shadow-sm'
+                          : 'hover:bg-black/5 dark:hover:bg-white/5 text-slate-800 dark:text-slate-100'
+                      }`}
+                    >
+                      <div className="flex items-center space-x-3 min-w-0">
+                        <span className="text-base shrink-0">{s.icon || '📦'}</span>
+                        <div className="min-w-0">
+                          <div className="flex items-center space-x-2 flex-wrap">
+                            <span className="font-mono font-bold text-xs tracking-tight">{s.code}</span>
+                            {isInvader && (
+                              <span
+                                className={`text-[9px] font-extrabold px-1.5 py-0.2 rounded border ${
+                                  isSelected
+                                    ? 'bg-rose-950/60 text-rose-200 border-rose-300/40'
+                                    : 'bg-rose-500/15 text-rose-600 dark:text-rose-400 border-rose-500/30'
+                                }`}
+                              >
+                                Fora do Local
+                              </span>
+                            )}
+                            {hasConflict && (
+                              <span
+                                className={`text-[9px] font-extrabold px-1.5 py-0.2 rounded border ${
+                                  isSelected
+                                    ? 'bg-amber-950/60 text-amber-200 border-amber-300/40'
+                                    : 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30'
+                                }`}
+                              >
+                                Conflito
+                              </span>
+                            )}
+                          </div>
+                          <div
+                            className={`text-[11px] truncate mt-0.5 ${
+                              isSelected ? 'text-white/85' : 'text-slate-500 dark:text-slate-400'
+                            }`}
+                          >
+                            <span>{s.name || 'Produto'}</span>
+                            {s.colorName ? <span> • {s.colorName}</span> : ''}
+                            {s.size ? <span> • Tam: {s.size}</span> : ''}
+                            <span> • {s.qty} pçs</span>
+                            {s.colecao ? <span> • Col: {s.colecao}</span> : ''}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center space-x-2 shrink-0">
+                        <span
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                            isSelected
+                              ? 'bg-white/20 text-white'
+                              : 'bg-slate-200/80 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                          }`}
+                        >
+                          Rua {s.rua}
+                        </span>
+                        <span
+                          className={`font-mono font-extrabold text-[11px] px-2.5 py-0.5 rounded shadow-2xs ${
+                            isSelected
+                              ? 'bg-white text-mac-blue font-black'
+                              : 'bg-black/10 dark:bg-white/10 text-slate-800 dark:text-slate-100'
+                          }`}
+                        >
+                          {s.wms}
+                        </span>
+                      </div>
+                    </button>
                   );
                 })
-                .slice(0, 25)
-                .map(s => (
-                  <button
-                    key={s.id}
-                    type="button"
-                    onClick={() => {
-                      selectStreet(s.rua);
-                      setSelectedAddressKey(s.wms);
-                      setSelectedSkuId(s.id);
-                      setSelectedRangeId('ALL-OCCUPIED');
-                      setShowSpotlight(false);
-                    }}
-                    className="w-full px-3 py-2 text-left hover:bg-mac-blue hover:text-white rounded-xl transition flex items-center justify-between"
-                  >
-                    <div className="flex items-center space-x-2 truncate">
-                      <span>{s.icon || '📦'}</span>
-                      <span className="font-mono font-bold">{s.code}</span>
-                      <span className="opacity-75 truncate">{s.name}</span>
-                    </div>
-                    <span className="font-mono font-extrabold text-[11px] px-2 py-0.5 rounded bg-black/10 dark:bg-white/10">
-                      {s.wms}
-                    </span>
-                  </button>
-                ))}
+              )}
+            </div>
+
+            {/* Spotlight Footer Bar */}
+            <div className="px-4 py-2.5 bg-black/[0.03] dark:bg-white/[0.03] border-t border-black/10 dark:border-white/10 flex flex-wrap items-center justify-between text-xs text-slate-500 dark:text-slate-400 gap-2">
+              <div className="flex items-center space-x-2">
+                <span className="font-bold text-slate-700 dark:text-slate-200">
+                  {filteredSpotlightItems.length} {filteredSpotlightItems.length === 1 ? 'resultado' : 'resultados'}
+                </span>
+                {spotlightQuery.trim() && (
+                  <span className="opacity-75 truncate max-w-xs">para "{spotlightQuery}"</span>
+                )}
+              </div>
+
+              <div className="flex items-center space-x-3 text-[11px]">
+                <span className="opacity-75 hidden sm:inline select-none">
+                  <kbd className="px-1.5 py-0.5 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">↑↓</kbd> navegar
+                  <kbd className="ml-1.5 px-1.5 py-0.5 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">↵</kbd> selecionar
+                  <kbd className="ml-1.5 px-1.5 py-0.5 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">esc</kbd> fechar
+                </span>
+
+                <button
+                  type="button"
+                  onClick={toggleSpotlightSound}
+                  className={`px-2 py-0.5 rounded-md font-medium text-[11px] transition flex items-center gap-1 ${
+                    soundEnabled && spotlightSoundEnabled
+                      ? 'text-emerald-600 dark:text-emerald-400 hover:underline font-semibold'
+                      : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-200'
+                  }`}
+                  title="Clique para alternar o feedback sonoro de busca"
+                >
+                  <span>{soundEnabled && spotlightSoundEnabled ? '🔊 Som: Ativado' : '🔇 Som: Silencioso'}</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -6145,6 +6788,21 @@ export default function App() {
           }}
           cloudSyncConfigured={Boolean(cloudSyncUrl)}
           cloudStatusText={cloudStatusText}
+        />
+      </ErrorBoundary>
+
+      {/* ==================================================================== */}
+      {/* MODAL 10: MOVEMENT HISTORY MODAL (CHRONOLOGICAL DE -> PARA)          */}
+      {/* ==================================================================== */}
+      <ErrorBoundary fallbackTitle="Falha ao renderizar Histórico de Movimentações">
+        <MovementHistoryModal
+          isOpen={showMovementHistoryModal}
+          onClose={() => setShowMovementHistoryModal(false)}
+          movedSkusRegistry={movedSkusRegistry}
+          onNavigateToSlot={handleNavigateFromHistory}
+          onRevertMovement={handleRevertMovement}
+          onClearHistory={handleClearMovedHistory}
+          soundEnabled={soundEnabled}
         />
       </ErrorBoundary>
 

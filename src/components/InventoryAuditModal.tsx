@@ -4,7 +4,7 @@ import {
   STREETS,
   isReservedCol35Street
 } from '../constants/wmsConstants';
-import { triggerCsvDownload } from '../utils/storageAndSync';
+import { triggerCsvDownload, buildOperatorMisplacedGuideCsv } from '../utils/storageAndSync';
 
 export interface InventoryAuditModalProps {
   isOpen: boolean;
@@ -82,10 +82,13 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
       if (item.isOutsideRegisteredLocal) {
         seenItemIds.add(item.id);
         const rua = item.rua || item.wms.split('.')[0] || '—';
+        const rawCad = (item.localCadastroRaw || item.rawLocal || '').trim();
+        const hasNoCad = !rawCad || /^(sem\s*local|s\/?cadastro|s\/?local|null|undefined)$/i.test(rawCad);
+        const localCadastroDisplay = hasNoCad ? 'S/Cadastro' : rawCad;
         list.push({
           id: `invader-${item.id}`,
           category: 'INVASOR_FORA_LOCAL',
-          badgeLabel: '⚠️ SKU Invasor (Fora do Cadastro)',
+          badgeLabel: hasNoCad ? '⚠️ SKU Sem Local de Cadastro' : '⚠️ SKU Invasor (Fora do Cadastro)',
           badgeClass: 'bg-amber-500/15 border-amber-500/40 text-amber-700 dark:text-amber-300',
           icon: '⚠️',
           rua,
@@ -98,11 +101,13 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
           colorHex: item.colorHex || '#94A3B8',
           size: item.size || '—',
           qty: item.qtdForaDoLocal || (typeof item.qty === 'number' ? item.qty : 1),
-          localCadastro: item.localCadastroRaw || item.rawLocal || 'Sem Local',
+          localCadastro: localCadastroDisplay,
           localAtual: item.wms,
           colecao: item.colecao || '—',
           deposito: item.deposito || '2',
-          diagnostico: `Peça bipada fisicamente em ${item.wms}, mas cadastrada para ${item.localCadastroRaw || item.rawLocal}`,
+          diagnostico: hasNoCad
+            ? `Peça em ${item.wms} sem local cadastrado (S/Cadastro) no sistema`
+            : `Peça bipada fisicamente em ${item.wms}, mas cadastrada para ${rawCad}`,
           itemRef: item
         });
       }
@@ -296,6 +301,17 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
     triggerCsvDownload(csvContent, filename);
   };
 
+  // Export Guia do Operador (Onde Tirar ➔ Onde Guardar ou S/Cadastro)
+  const handleExportOperatorGuide = () => {
+    const res = buildOperatorMisplacedGuideCsv(skus, barraItems);
+    if (res.count === 0) {
+      alert('Nenhuma peça fora do local cadastrado encontrada no estoque.');
+      return;
+    }
+    const todayStr = new Date().toISOString().slice(0, 10);
+    triggerCsvDownload(res.csv, `guia_operador_onde_tirar_e_guardar_${todayStr}.csv`);
+  };
+
   // Copy table to clipboard in TSV format
   const handleCopyTsv = () => {
     if (filteredRecords.length === 0) return;
@@ -376,13 +392,23 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
           <div className="flex items-center space-x-2">
             <button
               type="button"
+              onClick={handleExportOperatorGuide}
+              className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition flex items-center space-x-1.5 shadow-sm"
+              title="Baixar Guia do Operador: Onde Tirar ➔ Onde Guardar (ou S/Cadastro) em CSV"
+            >
+              <span>🚚</span>
+              <span className="hidden sm:inline">Guia do Operador (CSV)</span>
+            </button>
+
+            <button
+              type="button"
               onClick={handleExportCsv}
               disabled={filteredRecords.length === 0}
               className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition flex items-center space-x-1.5 shadow-sm disabled:opacity-40"
               title="Baixar arquivo CSV compatível com Excel e Google Sheets"
             >
               <span>📥</span>
-              <span className="hidden sm:inline">Exportar CSV</span>
+              <span className="hidden sm:inline">Exportar Auditoria</span>
             </button>
 
             <button
@@ -718,20 +744,30 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
                           {/* Local Cadastrado (Ficha do Produto) */}
                           <td className="py-3 px-3 align-top font-mono text-xs">
                             <div className="space-y-0.5">
-                              <div
-                                className={`font-bold ${
-                                  isInvader
-                                    ? 'text-amber-600 dark:text-amber-400 underline decoration-dotted'
-                                    : 'text-slate-700 dark:text-slate-300'
-                                }`}
-                              >
-                                {rec.localCadastro}
-                              </div>
-                              {isInvader && (
+                              {rec.localCadastro === 'S/Cadastro' ? (
+                                <span className="px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-700 dark:text-rose-300 font-mono font-extrabold text-[11px] inline-block border border-rose-500/30">
+                                  S/Cadastro
+                                </span>
+                              ) : (
+                                <div
+                                  className={`font-bold ${
+                                    isInvader
+                                      ? 'text-amber-600 dark:text-amber-400 underline decoration-dotted'
+                                      : 'text-slate-700 dark:text-slate-300'
+                                  }`}
+                                >
+                                  {rec.localCadastro}
+                                </div>
+                              )}
+                              {rec.localCadastro === 'S/Cadastro' ? (
                                 <span className="text-[10px] font-sans text-rose-500 font-semibold block">
+                                  Sem cadastro fixo no Sisplan
+                                </span>
+                              ) : isInvader ? (
+                                <span className="text-[10px] font-sans text-amber-600 dark:text-amber-400 font-semibold block">
                                   Diverge de {rec.wms}
                                 </span>
-                              )}
+                              ) : null}
                             </div>
                           </td>
 

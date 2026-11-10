@@ -51,8 +51,12 @@ export interface MovedSkuEntry {
   oldLocal: string;
   newLocal: string;
   movedAt: string;
+  timestamp?: number;
   source: 'drag' | 'relocate' | 'modal';
   name: string;
+  qty?: number;
+  ruaOrigem?: string;
+  ruaDestino?: string;
 }
 
 export interface ParsedWmsAddress {
@@ -148,7 +152,7 @@ export const ADDRESS_RANGES = [
 
 export const AERO_BRANDS: Record<string, string> = {
   '1': 'Aero',
-  '2': 'Aero (Perene)',
+  '2': 'Aero Perene',
   '3': 'Troya'
 };
 
@@ -159,46 +163,54 @@ export const AERO_LABELS: Record<string, string> = {
   '4': 'Marketing'
 };
 
+// Conforme documento oficial "Como é formado o código de produto Aero?"
 export const AERO_GROUPS: Record<string, { name: string; icon: string }> = {
   '01': { name: 'Bermuda', icon: '🩳' },
-  '02': { name: 'Boardshort', icon: '🏄' },
-  '03': { name: 'Blusa', icon: '👚' },
+  '1': { name: 'Bermuda', icon: '🩳' },
+  '02': { name: 'Blazer', icon: '🧥' },
+  '2': { name: 'Blazer', icon: '🧥' },
+  '03': { name: 'Blusão', icon: '👕' },
+  '3': { name: 'Blusão', icon: '👕' },
   '04': { name: 'Calça', icon: '👖' },
+  '4': { name: 'Calça', icon: '👖' },
   '05': { name: 'Camisa', icon: '👔' },
+  '5': { name: 'Camisa', icon: '👔' },
   '06': { name: 'Camiseta', icon: '👕' },
-  '07': { name: 'Camiseta Regata', icon: '🎽' },
-  '08': { name: 'Camisa Polo', icon: '👕' },
-  '09': { name: 'Casaco/Jaqueta', icon: '🧥' },
-  '10': { name: 'Macacão', icon: '🥋' },
-  '11': { name: 'Saia', icon: '👗' },
-  '12': { name: 'Short', icon: '🩳' },
-  '13': { name: 'Sungão', icon: '🩲' },
-  '14': { name: 'Vestido', icon: '👗' },
-  '15': { name: 'Biquíni', icon: '👙' },
-  '16': { name: 'Bolsa/Mochila', icon: '🎒' },
-  '17': { name: 'Boné/Chapéu/Gorro', icon: '🧢' },
-  '18': { name: 'Cachecol', icon: '🧣' },
-  '19': { name: 'Calçado', icon: '👟' },
-  '20': { name: 'Carteira', icon: '👛' },
-  '21': { name: 'Cinto', icon: ' belt ' },
-  '22': { name: 'Cueca', icon: '🩲' },
-  '23': { name: 'Maiô', icon: '🩱' },
-  '24': { name: 'Mala', icon: '🧳' },
-  '25': { name: 'Meia', icon: '🧦' },
-  '26': { name: 'Necessaire', icon: '👝' },
-  '27': { name: 'Óculos', icon: '🕶️' },
-  '28': { name: 'Pochete', icon: '👝' },
-  '29': { name: 'Pulseira/Colar', icon: '📿' },
-  '30': { name: 'Relógio', icon: '⌚' },
-  '31': { name: 'Toalha', icon: '🏖️' },
-  '32': { name: 'Brinde', icon: '🎁' },
-  '33': { name: 'Embalagem', icon: '📦' },
-  '34': { name: 'Gráfica', icon: '🖨️' },
-  '35': { name: 'Papelaria', icon: '📎' },
-  '36': { name: 'Adesivo', icon: '🏷️' },
-  '37': { name: 'Visual Merchandising', icon: '🪟' },
-  '38': { name: 'Uniforme', icon: '🦺' },
-  '39': { name: 'Campanha', icon: '📢' },
+  '6': { name: 'Camiseta', icon: '👕' },
+  '07': { name: 'Bata', icon: '👚' },
+  '7': { name: 'Bata', icon: '👚' },
+  '08': { name: 'Cueca', icon: '🩲' },
+  '8': { name: 'Cueca', icon: '🩲' },
+  '09': { name: 'Jaqueta', icon: '🧥' },
+  '9': { name: 'Jaqueta', icon: '🧥' },
+  '10': { name: 'Meia', icon: '🧦' },
+  '11': { name: 'Polo', icon: '👕' },
+  '12': { name: 'Saia', icon: '👗' },
+  '13': { name: 'Calçados', icon: '👟' },
+  '14': { name: 'Short', icon: '🩳' },
+  '15': { name: 'Tricot', icon: '🧶' },
+  '16': { name: 'Vestido', icon: '👗' },
+  '17': { name: 'Sunga', icon: '🩲' },
+  '18': { name: 'Baby Look', icon: '👚' },
+  '19': { name: 'Cropped', icon: '👚' },
+  '21': { name: 'Regata', icon: '🎽' },
+  '22': { name: 'Acessórios', icon: '🎒' },
+  '23': { name: 'Boné', icon: '🧢' },
+  '24': { name: 'Óculos', icon: '🕶️' },
+  '25': { name: 'Marketing', icon: '📢' },
+  '26': { name: 'Bermuda Jeans', icon: '🩳' },
+  '27': { name: 'Calça Jeans', icon: '👖' },
+  '28': { name: 'Jaqueta Jeans', icon: '🧥' },
+  '29': { name: 'Camisa Jeans', icon: '👔' },
+  '30': { name: 'Colete', icon: '🦺' },
+  '32': { name: 'Short Jeans', icon: '🩳' },
+  '33': { name: 'Perfume', icon: '🧴' },
+  '34': { name: 'Mochila', icon: '🎒' },
+  '35': { name: 'Bolsa', icon: '👜' },
+  '36': { name: 'Copo', icon: '🥤' },
+  '37': { name: 'Embalagem Aero', icon: '📦' },
+  '38': { name: 'Garrafa', icon: '🍼' },
+  '39': { name: 'Mala', icon: '🧳' },
   '40': { name: 'PDV', icon: '🏪' }
 };
 
@@ -516,12 +528,16 @@ export function decodeSkuPrefix(rawCode: string, explicitColor = '', explicitSiz
 
   const dMarca = baseDigits.charAt(0) || '1';
   const dEtiqueta = baseDigits.charAt(1) || '1';
-  const dGrupo = baseDigits.substring(2, 4) || '06';
+  const dGrupoRaw = baseDigits.substring(2, 4) || '06';
+  const dGrupo = dGrupoRaw.padStart(2, '0');
   const modelSeq = baseDigits.substring(4, 8) || '0001';
 
   const marca = AERO_BRANDS[dMarca] || 'Aero';
   const etiqueta = AERO_LABELS[dEtiqueta] || 'Masculino';
-  const groupObj = AERO_GROUPS[dGrupo] || { name: `Grupo ${dGrupo}`, icon: '📦' };
+  const groupObj =
+    AERO_GROUPS[dGrupo] ||
+    AERO_GROUPS[String(parseInt(dGrupo, 10))] ||
+    { name: `Grupo ${dGrupo}`, icon: '📦' };
 
   const colorCode = String(explicitColor || parts[1] || '101').trim().padStart(3, '0');
   const size = String(explicitSize || parts[2] || 'U').trim().toUpperCase();
@@ -547,5 +563,134 @@ export function decodeSkuPrefix(rawCode: string, explicitColor = '', explicitSiz
     colorBorder: colorObj.border,
     size,
     autoName: `${groupObj.name} ${marca} ${etiqueta} • ${colorObj.name} (${size})`
+  };
+}
+
+export interface HeatmapColorInfo {
+  pct: number;
+  label: string;
+  badgeEmoji: string;
+  badgeClass: string;
+  borderClass: string;
+  bgGradient: string;
+  cardBgStyle: React.CSSProperties;
+  mapBgStyle: React.CSSProperties;
+  barGradient: string;
+  textClass: string;
+  isCritical: boolean;
+}
+
+/**
+ * Mapeia a taxa de ocupação percentual (0 a 100%) para intensidade térmica e estilo visual.
+ * Permite identificar áreas críticas de estoque (>85%) e ruas com capacidade disponível.
+ */
+export function getHeatmapColorInfo(pct: number): HeatmapColorInfo {
+  const p = Math.max(0, Math.min(100, Math.round(pct)));
+
+  // Opacidade proporcional à taxa de ocupação (mais cheia = cor mais intensa e viva)
+  const alphaLow = (0.10 + (p / 100) * 0.32).toFixed(2);
+  const alphaHigh = (0.20 + (p / 100) * 0.42).toFixed(2);
+
+  if (p >= 88) {
+    // Crítica / Saturada (Vermelho Carmesim / Ruby)
+    return {
+      pct: p,
+      label: 'Crítica (Saturada)',
+      badgeEmoji: '🚨',
+      badgeClass: 'bg-rose-500/25 text-rose-700 dark:text-rose-200 border-rose-500/50',
+      borderClass: 'border-rose-500/70 shadow-[0_0_15px_rgba(244,63,94,0.35)]',
+      bgGradient: 'bg-gradient-to-br from-rose-500/35 via-rose-600/25 to-red-600/35',
+      cardBgStyle: {
+        background: `linear-gradient(135deg, rgba(239, 68, 68, ${alphaHigh}) 0%, rgba(185, 28, 28, ${alphaLow}) 100%)`
+      },
+      mapBgStyle: {
+        background: `radial-gradient(ellipse at top, rgba(239, 68, 68, 0.22) 0%, rgba(185, 28, 28, 0.10) 50%, transparent 85%)`
+      },
+      barGradient: 'bg-gradient-to-r from-orange-500 to-rose-600',
+      textClass: 'text-rose-600 dark:text-rose-400 font-black',
+      isCritical: true
+    };
+  }
+
+  if (p >= 70) {
+    // Alta Ocupação (Laranja / Coral)
+    return {
+      pct: p,
+      label: 'Alta Ocupação',
+      badgeEmoji: '🔥',
+      badgeClass: 'bg-orange-500/25 text-orange-700 dark:text-orange-200 border-orange-500/50',
+      borderClass: 'border-orange-500/60 shadow-[0_0_12px_rgba(249,115,22,0.25)]',
+      bgGradient: 'bg-gradient-to-br from-orange-500/30 via-orange-600/20 to-amber-600/30',
+      cardBgStyle: {
+        background: `linear-gradient(135deg, rgba(249, 115, 22, ${alphaHigh}) 0%, rgba(217, 119, 6, ${alphaLow}) 100%)`
+      },
+      mapBgStyle: {
+        background: `radial-gradient(ellipse at top, rgba(249, 115, 22, 0.16) 0%, rgba(217, 119, 6, 0.08) 50%, transparent 85%)`
+      },
+      barGradient: 'bg-gradient-to-r from-amber-500 to-orange-500',
+      textClass: 'text-orange-600 dark:text-orange-400 font-bold',
+      isCritical: false
+    };
+  }
+
+  if (p >= 45) {
+    // Média / Balanceada (Amarelo / Âmbar)
+    return {
+      pct: p,
+      label: 'Média / Balanceada',
+      badgeEmoji: '🟡',
+      badgeClass: 'bg-amber-500/20 text-amber-700 dark:text-amber-200 border-amber-500/40',
+      borderClass: 'border-amber-500/45',
+      bgGradient: 'bg-gradient-to-br from-amber-500/25 via-amber-600/15 to-yellow-600/20',
+      cardBgStyle: {
+        background: `linear-gradient(135deg, rgba(245, 158, 11, ${alphaHigh}) 0%, rgba(202, 138, 4, ${alphaLow}) 100%)`
+      },
+      mapBgStyle: {
+        background: `radial-gradient(ellipse at top, rgba(245, 158, 11, 0.12) 0%, rgba(202, 138, 4, 0.06) 50%, transparent 85%)`
+      },
+      barGradient: 'bg-gradient-to-r from-yellow-400 to-amber-500',
+      textClass: 'text-amber-600 dark:text-amber-400 font-bold',
+      isCritical: false
+    };
+  }
+
+  if (p >= 20) {
+    // Baixa / Disponível (Verde Esmeralda)
+    return {
+      pct: p,
+      label: 'Baixa / Disponível',
+      badgeEmoji: '🟢',
+      badgeClass: 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-200 border-emerald-500/40',
+      borderClass: 'border-emerald-500/35',
+      bgGradient: 'bg-gradient-to-br from-emerald-500/20 via-teal-600/15 to-cyan-600/20',
+      cardBgStyle: {
+        background: `linear-gradient(135deg, rgba(16, 185, 129, ${alphaHigh}) 0%, rgba(5, 150, 105, ${alphaLow}) 100%)`
+      },
+      mapBgStyle: {
+        background: `radial-gradient(ellipse at top, rgba(16, 185, 129, 0.10) 0%, rgba(5, 150, 105, 0.05) 50%, transparent 85%)`
+      },
+      barGradient: 'bg-gradient-to-r from-teal-400 to-emerald-500',
+      textClass: 'text-emerald-600 dark:text-emerald-400 font-bold',
+      isCritical: false
+    };
+  }
+
+  // Muito Baixa / Livre (<20% - Azul Glacial)
+  return {
+    pct: p,
+    label: 'Muito Baixa (Livre)',
+    badgeEmoji: '❄️',
+    badgeClass: 'bg-blue-500/15 text-blue-700 dark:text-blue-200 border-blue-500/30',
+    borderClass: 'border-blue-500/30',
+    bgGradient: 'bg-gradient-to-br from-blue-500/15 via-cyan-600/10 to-indigo-600/15',
+    cardBgStyle: {
+      background: `linear-gradient(135deg, rgba(59, 130, 246, ${alphaHigh}) 0%, rgba(37, 99, 235, ${alphaLow}) 100%)`
+    },
+    mapBgStyle: {
+      background: `radial-gradient(ellipse at top, rgba(59, 130, 246, 0.08) 0%, rgba(37, 99, 235, 0.04) 50%, transparent 85%)`
+    },
+    barGradient: 'bg-gradient-to-r from-blue-400 to-indigo-500',
+    textClass: 'text-blue-600 dark:text-blue-400 font-bold',
+    isCritical: false
   };
 }
