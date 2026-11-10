@@ -1208,8 +1208,9 @@ export function triggerCsvDownload(csvContent: string, filename: string) {
  */
 export function buildOperatorMisplacedGuideCsv(
   skus: SkuItem[],
-  barraItems: SkuItem[] = []
-): { csv: string; count: number } {
+  barraItems: SkuItem[] = [],
+  conflictSlots?: Set<string>
+): { csv: string; count: number; totalPieces: number } {
   const headers = [
     'ONDE_TIRAR_WMS',
     'RUA_ORIGEM',
@@ -1217,18 +1218,31 @@ export function buildOperatorMisplacedGuideCsv(
     'NIVEL_ORIGEM',
     'QTD_PECAS_A_TIRAR',
     'ONDE_GUARDAR_DESTINO',
+    'STATUS_LOCAL',
     'SKU_COMPLETO',
     'CODIGO_PRODUTO',
-    'GRUPO',
     'DESCRICAO_PRODUTO',
+    'GRUPO',
     'COR',
     'TAMANHO',
     'COLECAO',
     'INSTRUCAO_OPERADOR',
-    'STATUS_OPERACIONAL'
+    'DATA_EXPORTACAO'
   ];
 
-  const candidateItems = barraItems.length > 0 ? barraItems : skus;
+  // Combina itens de ambas as perspectivas para nunca deixar nenhuma peça incorreta de fora
+  const candidateItems: SkuItem[] = [];
+  const seenCandidateIds = new Set<string>();
+
+  for (const item of [...barraItems, ...skus]) {
+    if (!item || item.isTransbordo) continue;
+    // Identificador para evitar duplicatas entre barraItems e skus
+    const uniqueKey = `${item.wms}|${getCanonicalSkuKey(item.code)}`;
+    if (seenCandidateIds.has(uniqueKey)) continue;
+    seenCandidateIds.add(uniqueKey);
+    candidateItems.push(item);
+  }
+
   const misplacedRows: {
     wms: string;
     rua: string;
@@ -1248,30 +1262,47 @@ export function buildOperatorMisplacedGuideCsv(
   }[] = [];
 
   const seenKeys = new Set<string>();
+  let totalPieces = 0;
+  const nowIso = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
   for (const item of candidateItems) {
-    if (item.isTransbordo) continue;
-
     const rawCad = (item.localCadastroRaw || item.rawLocal || '').trim();
-    const hasNoCad = !rawCad || /^(sem\s*local|s\/?cadastro|s\/?local|null|undefined)$/i.test(rawCad);
-    const isOutside = Boolean(item.isOutsideRegisteredLocal || hasNoCad || (rawCad && !rawCad.includes(item.wms)));
+    const hasNoCad =
+      !rawCad ||
+      /^(sem\s*local|s\/?cadastro|s\/?local|null|undefined|nao\s*cadastrado|n\/?a|vazio)$/i.test(rawCad) ||
+      rawCad === '-' ||
+      rawCad === '—';
 
-    if (!isOutside) continue;
+    // Endereço normalizado do cadastro
+    const cleanCad = hasNoCad ? 'S/Cadastro' : rawCad;
+
+    // Verifica se a colmeia atual não bate com o local cadastrado
+    const isMismatch = Boolean(rawCad && !hasNoCad && !rawCad.toUpperCase().includes(item.wms.toUpperCase()));
+    const isConflict = Boolean(conflictSlots && conflictSlots.has(item.wms));
+    const isMisplaced = Boolean(item.isOutsideRegisteredLocal || hasNoCad || isMismatch || isConflict);
+
+    if (!isMisplaced) continue;
 
     const dec = decodeSkuPrefix(item.code, item.colorCode, item.size);
     const codigoBase = item.codigoBase || dec.dMarca + dec.dEtiqueta + dec.dGrupo + dec.modelSeq;
-    const destinoLocal = hasNoCad ? 'S/Cadastro' : rawCad;
+    const destinoLocal = hasNoCad ? 'S/Cadastro' : cleanCad;
     const qty = item.qtdForaDoLocal || item.qty || 1;
-    const dedupeKey = `${item.wms}|${codigoBase}|${dec.colorCode}|${dec.size}|${destinoLocal}`;
 
+    const dedupeKey = `${item.wms}|${codigoBase}|${dec.colorCode}|${dec.size}|${destinoLocal}`;
     if (seenKeys.has(dedupeKey)) continue;
     seenKeys.add(dedupeKey);
 
     const instrucao = hasNoCad
-      ? `Retirar ${qty} pçs de ${item.wms} -> Item S/Cadastro: enviar para Triagem/Pulmão`
-      : `Retirar ${qty} pçs de ${item.wms} e guardar em ${destinoLocal}`;
+      ? `Retirar ${qty} pçs de ${item.wms} -> Item S/Cadastro: encaminhar para Triagem/Pulmão de Cadastro`
+      : `Retirar ${qty} pçs de ${item.wms} e alocar no endereço cadastrado ${destinoLocal}`;
 
-    const status = hasNoCad ? 'Sem Local de Cadastro' : 'Fora do Local Cadastrado';
+    const status = hasNoCad
+      ? 'Item S/Cadastro (Sem Local Definido)'
+      : isConflict
+      ? 'Conflito de Sobreposição / Fora do Local'
+      : 'Fora do Local Cadastrado';
+
+    totalPieces += qty;
 
     misplacedRows.push({
       wms: item.wms,
@@ -1292,7 +1323,7 @@ export function buildOperatorMisplacedGuideCsv(
     });
   }
 
-  // Ordena por Rua, Posição e Nível para criar rota lógica de corredor para o operador
+  // Ordena por Rua, Posição e Nível para criar rota lógica de corredor físico para o operador
   misplacedRows.sort((a, b) => {
     if (a.rua !== b.rua) return a.rua.localeCompare(b.rua);
     if (a.pos !== b.pos) return a.pos - b.pos;
@@ -1309,21 +1340,23 @@ export function buildOperatorMisplacedGuideCsv(
         r.nivel,
         r.qty,
         `"${r.destino.replace(/"/g, '""')}"`,
+        `"${r.status.replace(/"/g, '""')}"`,
         `"${r.skuCode.replace(/"/g, '""')}"`,
         r.codigoBase,
-        `"${r.grupo.replace(/"/g, '""')}"`,
         `"${r.nome.replace(/"/g, '""')}"`,
+        `"${r.grupo.replace(/"/g, '""')}"`,
         `"${r.cor.replace(/"/g, '""')}"`,
         r.tam,
         r.colecao,
         `"${r.instrucao.replace(/"/g, '""')}"`,
-        `"${r.status.replace(/"/g, '""')}"`
+        `"${nowIso}"`
       ].join(';')
     );
   }
 
   return {
-    csv: lines.join('\r\n'),
-    count: misplacedRows.length
+    csv: '\uFEFF' + lines.join('\r\n'),
+    count: misplacedRows.length,
+    totalPieces
   };
 }

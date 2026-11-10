@@ -14,6 +14,7 @@ export interface ExecutiveDashboardProps {
   invaderCount?: number;
   onNavigateToConflict?: () => void;
   onOpenInventoryAudit?: () => void;
+  onExportMisplacedGuide?: () => void;
   onOpenSpotlight?: () => void;
   onToggleHeatmap?: () => void;
   isHeatmapActive?: boolean;
@@ -33,6 +34,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
   invaderCount = 0,
   onNavigateToConflict,
   onOpenInventoryAudit,
+  onExportMisplacedGuide,
   onOpenSpotlight,
   onToggleHeatmap,
   isHeatmapActive = false,
@@ -86,7 +88,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
       aria-label="Dashboard Executivo de Estoque"
       className="w-full shrink-0 z-30 select-none bg-white/80 dark:bg-slate-900/85 backdrop-blur-md border-b border-black/10 dark:border-white/10 transition-all duration-300 shadow-xs"
     >
-      <div className="max-w-[1600px] mx-auto px-3 sm:px-4 py-2">
+      <div className="w-full px-3 sm:px-5 py-2">
         {/* Header bar of the dashboard with title and collapse toggle */}
         <div className="flex items-center justify-between pb-1 text-[11px] font-medium text-slate-500 dark:text-slate-400">
           <div className="flex items-center space-x-2">
@@ -344,6 +346,17 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
                           Auditar
                         </button>
                       )}
+                      {onExportMisplacedGuide && (
+                        <button
+                          type="button"
+                          onClick={onExportMisplacedGuide}
+                          className="px-1.5 py-0.5 rounded bg-orange-600 hover:bg-orange-700 text-white font-bold text-[10px] transition shadow-xs flex items-center gap-0.5"
+                          title="Exportar CSV de itens em locais incorretos com rotulação S/Cadastro"
+                        >
+                          <span>🚚</span>
+                          <span>CSV</span>
+                        </button>
+                      )}
                     </div>
                   </>
                 ) : (
@@ -427,8 +440,19 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
                     type="button"
                     onClick={onNavigateToConflict}
                     className="ml-1 px-1.5 py-0.2 rounded bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-[9px] transition"
+                    title="Ir ao conflito"
                   >
                     Ir ➜
+                  </button>
+                )}
+                {conflictCount > 0 && onExportMisplacedGuide && (
+                  <button
+                    type="button"
+                    onClick={onExportMisplacedGuide}
+                    className="ml-1 px-1.5 py-0.2 rounded bg-orange-600 hover:bg-orange-700 text-white font-extrabold text-[9px] transition"
+                    title="Exportar CSV de itens em locais incorretos com 'S/Cadastro'"
+                  >
+                    CSV
                   </button>
                 )}
               </div>

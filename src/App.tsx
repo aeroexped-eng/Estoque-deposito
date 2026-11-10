@@ -68,8 +68,6 @@ type OccupancyFilter =
   | 'LOW_STOCK_LT5'
   | 'TRANSBORDO';
 
-const WALLPAPERS = ['wallpaper-sequoia', 'wallpaper-sonoma', 'wallpaper-ventura'] as const;
-
 export default function App() {
   // Core WMS Data State
   const [skus, setSkus] = useState<SkuItem[]>([]);
@@ -141,13 +139,10 @@ export default function App() {
   const [pulmaoTempNote, setPulmaoTempNote] = useState<string>('Armazenamento Temporário (Pulmão)');
   const [pulmaoTempQty, setPulmaoTempQty] = useState<number>(1);
 
-  // Theme, Window & Sound State
+  // Theme & Sound State
   const [isDark, setIsDark] = useState<boolean>(false);
-  const [wallpaperIdx, setWallpaperIdx] = useState<number>(0);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
-  const [isMinimized, setIsMinimized] = useState<boolean>(false);
-  const [isDockCollapsed, setIsDockCollapsed] = useState<boolean>(false);
   const [sidebarOpenMobile, setSidebarOpenMobile] = useState<boolean>(false);
   const [inspectorOpenMobile, setInspectorOpenMobile] = useState<boolean>(false);
   const [sidebarCollapsedDesktop, setSidebarCollapsedDesktop] = useState<boolean>(false);
@@ -1922,20 +1917,20 @@ export default function App() {
   };
 
   const exportBarraInvadersGuideCsv = () => {
-    const res = buildOperatorMisplacedGuideCsv(skus, barraItems);
+    const res = buildOperatorMisplacedGuideCsv(skus, barraItems, conflictAnalysis.allConflictSlots);
     if (res.count === 0) {
       playMacSound('alert', soundEnabled);
-      showToast('Estoque Conforme', 'Nenhuma peça fora do local cadastrado encontrada.', '✅');
+      showToast('Estoque Regular', 'Nenhum item em local incorreto ou sem cadastro encontrado.', '✅');
       return;
     }
     triggerCsvDownload(
       res.csv,
-      `guia_operador_onde_tirar_e_guardar_${new Date().toISOString().slice(0, 10)}.csv`
+      `itens_locais_incorretos_scadastro_${new Date().toISOString().slice(0, 10)}.csv`
     );
     playMacSound('success', soundEnabled);
     showToast(
-      'Guia do Operador Exportado',
-      `${res.count} peças fora do lugar mapeadas (com indicação S/Cadastro).`,
+      'CSV de Itens Incorretos Exportado',
+      `${res.count} itens (${res.totalPieces} peças) mapeados para correção com rótulo 'S/Cadastro'.`,
       '🚚'
     );
   };
@@ -2206,13 +2201,13 @@ export default function App() {
 
   return (
     <div
-      className={`${WALLPAPERS[wallpaperIdx]} text-slate-900 dark:text-slate-100 h-full w-full overflow-hidden flex flex-col justify-between relative select-none`}
+      className="h-screen w-screen overflow-hidden flex flex-col relative select-none bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors duration-200"
     >
       {/* ==================================================================== */}
-      {/* TOP MACOS SEQUOIA MENUBAR                                            */}
+      {/* TOP MENUBAR                                                          */}
       {/* ==================================================================== */}
       {!isFullscreen && (
-        <header className="mac-menubar h-7 px-3 flex items-center justify-between text-xs font-medium z-40 shrink-0">
+        <header className="mac-menubar h-8 px-4 flex items-center justify-between text-xs font-medium z-40 shrink-0 border-b border-black/10 dark:border-white/10 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md rounded-none">
           <div className="flex items-center space-x-3 relative">
             <button
               type="button"
@@ -2270,6 +2265,14 @@ export default function App() {
             </button>
             <button
               type="button"
+              onClick={exportBarraInvadersGuideCsv}
+              className="hover:bg-black/10 dark:hover:bg-white/15 px-2 py-0.5 rounded transition hidden xl:inline-block text-orange-600 dark:text-orange-400 font-semibold"
+              title="Exportar CSV de itens em locais incorretos com rotulação 'S/Cadastro'"
+            >
+              🚚 Exportar Incorretos CSV
+            </button>
+            <button
+              type="button"
               onClick={() => setShowCloudModal(true)}
               className="hover:bg-black/10 dark:hover:bg-white/15 px-2 py-0.5 rounded transition hidden lg:inline-block text-mac-blue font-bold"
             >
@@ -2304,17 +2307,6 @@ export default function App() {
                 >
                   <span>Alternar Modo Claro / Escuro</span>
                   <span>🌓</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setOpenMenu(null);
-                    setWallpaperIdx(i => (i + 1) % WALLPAPERS.length);
-                  }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between"
-                >
-                  <span>Trocar Wallpaper macOS</span>
-                  <span>🖼️</span>
                 </button>
                 <div className="border-t border-black/10 dark:border-white/10 my-1" />
                 <button
@@ -2871,6 +2863,7 @@ export default function App() {
           invaderCount={conflictAnalysis.invaderSlots.size}
           onNavigateToConflict={navigateToConflict}
           onOpenInventoryAudit={() => setShowAuditModal(true)}
+          onExportMisplacedGuide={exportBarraInvadersGuideCsv}
           onOpenSpotlight={() => {
             setShowSpotlight(true);
             playMacSound('search', soundEnabled);
@@ -2890,48 +2883,13 @@ export default function App() {
       )}
 
       {/* ==================================================================== */}
-      {/* MAIN WORKSPACE AREA                                                  */}
+      {/* MAIN WORKSPACE AREA (FULL SCREEN OPERATING SYSTEM)                   */}
       {/* ==================================================================== */}
-      <main
-        className={`flex-1 flex flex-col items-center justify-center overflow-hidden min-h-0 relative ${
-          isFullscreen ? 'p-0' : 'px-1.5 pt-1 pb-1 sm:px-2.5 sm:pt-1.5 sm:pb-1.5'
-        }`}
-      >
-        <div
-          className={`mac-window w-full h-full flex flex-col overflow-hidden relative ${
-            isFullscreen ? 'max-w-full rounded-none border-none' : 'max-w-[1600px] rounded-2xl'
-          } ${isMinimized ? 'scale-95 opacity-0 pointer-events-none' : ''}`}
-        >
-          {/* Window Titlebar & Global Warehouse KPIs */}
-          <div className="h-11 px-3.5 flex items-center justify-between border-b border-black/10 dark:border-white/10 shrink-0 bg-white/40 dark:bg-black/20">
-            <div className="flex items-center space-x-3">
-              <div className="traffic-group flex items-center space-x-2">
-                <button
-                  type="button"
-                  onClick={() => setIsMinimized(true)}
-                  className="w-3 h-3 rounded-full bg-mac-red flex items-center justify-center shadow-inner"
-                  title="Minimizar para o Dock"
-                >
-                  <span className="traffic-icon text-[8px] font-bold text-black/80">✕</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsMinimized(true)}
-                  className="w-3 h-3 rounded-full bg-mac-yellow flex items-center justify-center shadow-inner"
-                  title="Minimizar"
-                >
-                  <span className="traffic-icon text-[8px] font-bold text-black/80">−</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsFullscreen(f => !f)}
-                  className="w-3 h-3 rounded-full bg-mac-green flex items-center justify-center shadow-inner"
-                  title="Tela Cheia (Foco no Mapa)"
-                >
-                  <span className="traffic-icon text-[8px] font-bold text-black/80">+</span>
-                </button>
-              </div>
-
+      <main className="flex-1 w-full h-full flex flex-col overflow-hidden min-h-0 relative">
+        <div className="w-full h-full flex flex-col overflow-hidden relative bg-white/70 dark:bg-slate-900/70 rounded-none border-none">
+          {/* Main Warehouse Toolbar */}
+          <div className="h-11 px-3 sm:px-4 flex items-center justify-between border-b border-black/10 dark:border-white/10 shrink-0 bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-none">
+            <div className="flex items-center space-x-2.5 sm:space-x-3 shrink-0">
               <button
                 type="button"
                 onClick={() => {
@@ -3015,8 +2973,8 @@ export default function App() {
             </div>
 
             {/* Action Toolbar */}
-            <div className="flex items-center space-x-1.5">
-              <div className="flex bg-black/10 dark:bg-white/10 p-0.5 rounded-lg text-xs items-center gap-0.5">
+            <div className="flex items-center space-x-1.5 shrink-0 overflow-x-auto no-scrollbar py-1">
+              <div className="flex bg-black/10 dark:bg-white/10 p-0.5 rounded-lg text-xs items-center gap-0.5 shrink-0">
                 <button
                   type="button"
                   onClick={() => setMapMode('cards')}
@@ -3157,6 +3115,16 @@ export default function App() {
               >
                 <span>📥</span>
                 <span className="hidden sm:inline">Importar CSV</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={exportBarraInvadersGuideCsv}
+                className="px-2.5 py-1.5 rounded-lg bg-orange-600 hover:bg-orange-500 text-white font-semibold text-xs shadow-sm transition flex items-center space-x-1 shrink-0"
+                title="Exportar CSV de itens em locais incorretos com rotulação 'S/Cadastro' onde não houver local definido"
+              >
+                <span>🚚</span>
+                <span className="hidden md:inline">Itens Incorretos CSV</span>
               </button>
 
               {movedCount > 0 && (
@@ -5546,140 +5514,7 @@ export default function App() {
         </nav>
       )}
 
-      {/* ==================================================================== */}
-      {/* RETRACTABLE MACOS DOCK (DESKTOP ONLY)                                */}
-      {/* ==================================================================== */}
-      {!isFullscreen && (
-        <div className="hidden lg:flex fixed bottom-1.5 left-1/2 -translate-x-1/2 z-40 flex-col items-center pointer-events-none">
-          <button
-            type="button"
-            onClick={() => setIsDockCollapsed(c => !c)}
-            className="pointer-events-auto mb-1 px-3 py-0.5 rounded-full bg-black/55 dark:bg-slate-900/80 text-white text-[10px] font-mono font-semibold backdrop-blur-md border border-white/15 shadow hover:bg-mac-blue transition"
-          >
-            {isDockCollapsed ? '▲ Mostrar Dock' : '▼ Ocultar Dock'}
-          </button>
 
-          {!isDockCollapsed && (
-            <nav className="mac-dock px-3 py-1.5 rounded-2xl flex items-center space-x-2 pointer-events-auto">
-              <button
-                type="button"
-                onClick={() => {
-                  setIsMinimized(false);
-                  setMapMode('cards');
-                }}
-                className="dock-item w-10 h-10 rounded-xl bg-gradient-to-b from-sky-400 to-blue-600 flex items-center justify-center text-lg shadow-lg text-white"
-                title="Modo Cards (Colmeias)"
-              >
-                🗺️
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setIsMinimized(false);
-                  setMapMode('rack');
-                }}
-                className="dock-item w-10 h-10 rounded-xl bg-gradient-to-b from-indigo-400 to-indigo-700 flex items-center justify-center text-lg shadow-lg text-white"
-                title="Modo Matriz Porta-Paletes"
-              >
-                🏢
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setIsMinimized(false);
-                  setIsHeatmapActive(h => {
-                    const next = !h;
-                    playMacSound(next ? 'search' : 'pop', soundEnabled);
-                    return next;
-                  });
-                }}
-                className={`dock-item w-10 h-10 rounded-xl flex items-center justify-center text-lg shadow-lg text-white transition ${
-                  isHeatmapActive
-                    ? 'bg-gradient-to-b from-orange-500 to-rose-600 ring-2 ring-white scale-110 shadow-orange-500/50'
-                    : 'bg-gradient-to-b from-amber-500 to-orange-700'
-                }`}
-                title="Modo Heatmap (Mapa de Calor Térmico de Ocupação)"
-              >
-                🔥
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setIsMinimized(false);
-                  selectStreet('RF');
-                }}
-                className="dock-item w-10 h-10 rounded-xl bg-gradient-to-b from-amber-400 to-orange-600 flex items-center justify-center text-lg shadow-lg text-white"
-                title="Reserva Coleção 35 (RF a RH)"
-              >
-                ⭐
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setIsMinimized(false);
-                  selectStreet('AA');
-                }}
-                className="dock-item w-10 h-10 rounded-xl bg-gradient-to-b from-cyan-400 to-teal-700 flex items-center justify-center text-lg shadow-lg text-white"
-                title="Ala de Acessórios (AA a AF)"
-              >
-                🧣
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setIsMinimized(false);
-                  selectStreet('PA');
-                }}
-                className="dock-item w-10 h-10 rounded-xl bg-gradient-to-b from-violet-400 to-indigo-700 flex items-center justify-center text-lg shadow-lg text-white"
-                title="Pulmão Temporário (PA a PI)"
-              >
-                📦
-              </button>
-              <button
-                type="button"
-                onClick={() => setTransbordoSelectMode(m => !m)}
-                className="dock-item w-10 h-10 rounded-xl bg-gradient-to-b from-yellow-300 to-amber-500 flex items-center justify-center text-lg shadow-lg text-slate-950 font-extrabold"
-                title="Modo Transbordo (Mini Pulmão)"
-              >
-                ⚡
-              </button>
-              <div className="h-7 w-[1px] bg-black/15 dark:bg-white/20 mx-1" />
-              <button
-                type="button"
-                onClick={() => setShowImportModal(true)}
-                className="dock-item w-10 h-10 rounded-xl bg-gradient-to-b from-emerald-400 to-teal-600 flex items-center justify-center text-lg shadow-lg text-white"
-                title="Importar Planilha CSV (⌘O)"
-              >
-                📥
-              </button>
-              <button
-                type="button"
-                onClick={() => openAllocateOrEditSkuModal(null)}
-                className="dock-item w-10 h-10 rounded-xl bg-gradient-to-b from-blue-500 to-blue-700 flex items-center justify-center text-lg shadow-lg text-white"
-                title="Alocar Novo SKU (⌘N)"
-              >
-                ➕
-              </button>
-              <button
-                type="button"
-                onClick={() => openRelocateModalWithSku(null)}
-                className="dock-item w-10 h-10 rounded-xl bg-gradient-to-b from-purple-400 to-fuchsia-700 flex items-center justify-center text-lg shadow-lg text-white"
-                title="Remanejar SKU (⌘R)"
-              >
-                ⇄
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowCloudModal(true)}
-                className="dock-item w-10 h-10 rounded-xl bg-gradient-to-b from-slate-600 to-slate-800 flex items-center justify-center text-lg shadow-lg text-white"
-                title="Salvar no Google Sites / Nuvem"
-              >
-                ☁️
-              </button>
-            </nav>
-          )}
-        </div>
-      )}
 
       {/* ==================================================================== */}
       {/* MODAL 1: IMPORT CSV                                                  */}

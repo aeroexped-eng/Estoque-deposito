@@ -303,13 +303,13 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
 
   // Export Guia do Operador (Onde Tirar ➔ Onde Guardar ou S/Cadastro)
   const handleExportOperatorGuide = () => {
-    const res = buildOperatorMisplacedGuideCsv(skus, barraItems);
+    const res = buildOperatorMisplacedGuideCsv(skus, barraItems, conflictAnalysis.allConflictSlots);
     if (res.count === 0) {
-      alert('Nenhuma peça fora do local cadastrado encontrada no estoque.');
+      alert('Nenhum item em local incorreto ou sem cadastro encontrado no estoque.');
       return;
     }
     const todayStr = new Date().toISOString().slice(0, 10);
-    triggerCsvDownload(res.csv, `guia_operador_onde_tirar_e_guardar_${todayStr}.csv`);
+    triggerCsvDownload(res.csv, `itens_locais_incorretos_scadastro_${todayStr}.csv`);
   };
 
   // Copy table to clipboard in TSV format
