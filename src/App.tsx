@@ -54,6 +54,7 @@ import { InventoryAuditModal } from './components/InventoryAuditModal';
 import { AutoSaveModal } from './components/AutoSaveModal';
 import { MovementHistoryModal } from './components/MovementHistoryModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { ExecutiveDashboard } from './components/ExecutiveDashboard';
 
 type WmsPerspective = 'sku' | 'barra';
 type MapMode = 'cards' | 'rack';
@@ -167,6 +168,35 @@ export default function App() {
   const [showAuditModal, setShowAuditModal] = useState<boolean>(false);
   const [showAutoSaveModal, setShowAutoSaveModal] = useState<boolean>(false);
   const [showMovementHistoryModal, setShowMovementHistoryModal] = useState<boolean>(false);
+  const [showExecutiveDashboard, setShowExecutiveDashboard] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('estoque_show_executive_dashboard');
+      return saved !== null ? saved === 'true' : true;
+    } catch {
+      return true;
+    }
+  });
+  const [isExecutiveExpanded, setIsExecutiveExpanded] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('estoque_executive_dashboard_expanded');
+      return saved !== null ? saved === 'true' : true;
+    } catch {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('estoque_show_executive_dashboard', String(showExecutiveDashboard));
+    } catch {}
+  }, [showExecutiveDashboard]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('estoque_executive_dashboard_expanded', String(isExecutiveExpanded));
+    } catch {}
+  }, [isExecutiveExpanded]);
+
   const [isAutoSaveEnabled, setIsAutoSaveEnabled] = useState<boolean>(true);
   const [autoSaveIntervalSeconds, setAutoSaveIntervalSeconds] = useState<number>(120); // 2 minutos
   const [autoSaveCountdown, setAutoSaveCountdown] = useState<number>(120);
@@ -820,6 +850,22 @@ export default function App() {
       selectedStreetHeat: getHeatmapColorInfo(streetStats.byStreet[selectedStreet]?.pct || 0)
     };
   }, [streetStats, selectedStreet]);
+
+  // Executive Dashboard Metrics: Total SKUs, total pieces, and unique references
+  const totalSkusMetrics = useMemo(() => {
+    const nonTrb = skus.filter(s => !s.isTransbordo);
+    const uniqueCodes = new Set(nonTrb.map(s => getCanonicalSkuKey(s.code)));
+    const totalPieces = nonTrb.reduce((acc, it) => {
+      const q = typeof it.qty === 'number' && !isNaN(it.qty) && it.qty > 0 ? it.qty : 1;
+      return acc + q;
+    }, 0);
+
+    return {
+      unique: uniqueCodes.size,
+      totalRecords: nonTrb.length,
+      totalPieces
+    };
+  }, [skus]);
 
   // Helper to get all sibling items of a SKU
   const getSkuMultiLevelInfo = useCallback(
@@ -2522,6 +2568,35 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     setOpenMenu(null);
+                    setShowExecutiveDashboard(d => {
+                      const next = !d;
+                      playMacSound(next ? 'search' : 'pop', soundEnabled);
+                      showToast(
+                        next ? 'Dashboard Executivo Ativado' : 'Dashboard Executivo Ocultado',
+                        next ? 'Cards de resumo exibidos no topo da tela.' : 'Cards de resumo ocultados.',
+                        '📊'
+                      );
+                      return next;
+                    });
+                  }}
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between font-bold text-slate-700 dark:text-slate-200"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>📊</span>
+                    <span>Dashboard Executivo (Topo)</span>
+                  </span>
+                  <span className={`font-mono text-[9px] px-1.5 py-0.2 rounded-full font-bold ${
+                    showExecutiveDashboard
+                      ? 'bg-mac-blue/20 text-mac-blue ring-1 ring-mac-blue/40'
+                      : 'bg-black/10 dark:bg-white/10 text-slate-400'
+                  }`}>
+                    {showExecutiveDashboard ? 'Visível' : 'Oculto'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpenMenu(null);
                     setShowReportModal(true);
                   }}
                   className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between font-bold text-mac-blue"
@@ -2779,6 +2854,41 @@ export default function App() {
         </header>
       )}
 
+      {/* DASHBOARD EXECUTIVO - Logo abaixo da barra de menu */}
+      {showExecutiveDashboard && (
+        <ExecutiveDashboard
+          totalSkusCount={totalSkusMetrics}
+          totalPieces={totalSkusMetrics.totalPieces}
+          grandOccupiedSlots={streetStats.grandOccupiedSlots}
+          grandTotalSlots={streetStats.grandTotalSlots}
+          grandFreeSlots={streetStats.grandFreeSlots}
+          occupancyPercentage={
+            streetStats.grandTotalSlots > 0
+              ? Math.round((streetStats.grandOccupiedSlots / streetStats.grandTotalSlots) * 100)
+              : 0
+          }
+          conflictCount={conflictAnalysis.allConflictSlots.size}
+          invaderCount={conflictAnalysis.invaderSlots.size}
+          onNavigateToConflict={navigateToConflict}
+          onOpenInventoryAudit={() => setShowAuditModal(true)}
+          onOpenSpotlight={() => {
+            setShowSpotlight(true);
+            playMacSound('search', soundEnabled);
+          }}
+          onToggleHeatmap={() => {
+            setIsHeatmapActive(h => {
+              const next = !h;
+              playMacSound(next ? 'search' : 'pop', soundEnabled);
+              return next;
+            });
+          }}
+          isHeatmapActive={isHeatmapActive}
+          isExpanded={isExecutiveExpanded}
+          onToggleExpanded={() => setIsExecutiveExpanded(e => !e)}
+          onClose={() => setShowExecutiveDashboard(false)}
+        />
+      )}
+
       {/* ==================================================================== */}
       {/* MAIN WORKSPACE AREA                                                  */}
       {/* ==================================================================== */}
@@ -2955,6 +3065,25 @@ export default function App() {
                   {isHeatmapActive && (
                     <span className="w-1.5 h-1.5 rounded-full bg-yellow-300 animate-ping inline-block" />
                   )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowExecutiveDashboard(d => {
+                      const next = !d;
+                      playMacSound(next ? 'search' : 'pop', soundEnabled);
+                      return next;
+                    });
+                  }}
+                  className={`px-2.5 py-1 rounded-md font-bold transition flex items-center space-x-1 ${
+                    showExecutiveDashboard
+                      ? 'bg-mac-blue/20 text-mac-blue dark:text-blue-300 ring-1 ring-mac-blue/40'
+                      : 'hover:bg-black/5 dark:hover:bg-white/10 text-slate-500 dark:text-slate-400'
+                  }`}
+                  title="Exibir/Ocultar Cards de Resumo do Dashboard Executivo no Topo"
+                >
+                  <span>📊</span>
+                  <span className="hidden sm:inline">Executivo</span>
                 </button>
               </div>
 
