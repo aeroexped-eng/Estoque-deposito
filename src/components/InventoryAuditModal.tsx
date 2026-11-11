@@ -46,6 +46,7 @@ export interface AuditRecord {
   deposito: string;
   diagnostico: string;
   itemRef: SkuItem;
+  isHighRisk: boolean;
 }
 
 export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
@@ -59,7 +60,7 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
   onNavigateToSlot
 }) => {
   const [selectedRuaFilter, setSelectedRuaFilter] = useState<string>('ALL');
-  const [selectedTypeFilter, setSelectedTypeFilter] = useState<'ALL' | 'CONFLITO' | 'INVASOR' | 'FRAGMENTADO'>('ALL');
+  const [selectedTypeFilter, setSelectedTypeFilter] = useState<'ALL' | 'CONFLITO' | 'INVASOR' | 'FRAGMENTADO' | 'HIGH_RISK'>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [copiedNotification, setCopiedNotification] = useState<boolean>(false);
 
@@ -70,6 +71,21 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
     }
     return skus;
   }, [wmsPerspective, barraItems, skus]);
+
+  // Set of High-Risk slots: slots that contain an 'Invader' item AND are marked as a conflict zone simultaneously
+  const highRiskSlots = useMemo(() => {
+    const set = new Set<string>();
+    for (const wms of conflictAnalysis.invaderSlots) {
+      if (
+        conflictAnalysis.allConflictSlots.has(wms) ||
+        conflictAnalysis.overlappedSlots.has(wms) ||
+        conflictAnalysis.splitSkuSlots.has(wms)
+      ) {
+        set.add(wms);
+      }
+    }
+    return set;
+  }, [conflictAnalysis]);
 
   // Build complete list of discrepancy audit records
   const allAuditRecords = useMemo(() => {
@@ -108,7 +124,8 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
           diagnostico: hasNoCad
             ? `Peça em ${item.wms} sem local cadastrado (S/Cadastro) no sistema`
             : `Peça bipada fisicamente em ${item.wms}, mas cadastrada para ${rawCad}`,
-          itemRef: item
+          itemRef: item,
+          isHighRisk: highRiskSlots.has(item.wms)
         });
       }
     }
@@ -142,7 +159,8 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
           colecao: item.colecao || '—',
           deposito: item.deposito || '2',
           diagnostico: `Compartilha a célula ${wmsKey} com: ${otherSkuCodes.filter(c => c !== item.code.split(' - ')[0]).join(', ') || 'outro SKU'}`,
-          itemRef: item
+          itemRef: item,
+          isHighRisk: highRiskSlots.has(wmsKey)
         });
       }
     }
@@ -177,14 +195,15 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
             colecao: item.colecao || '—',
             deposito: item.deposito || '2',
             diagnostico: `Estoque deste mesmo SKU está distribuído em mais de uma prumada/torre física`,
-            itemRef: item
+            itemRef: item,
+            isHighRisk: highRiskSlots.has(item.wms)
           });
         }
       }
     }
 
     return list;
-  }, [activeItems, conflictAnalysis, addressMap]);
+  }, [activeItems, conflictAnalysis, addressMap, highRiskSlots]);
 
   // Available streets with discrepancy counts
   const streetDiscrepancyCounts = useMemo(() => {
@@ -216,6 +235,9 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
       if (selectedTypeFilter === 'FRAGMENTADO' && rec.category !== 'SKU_FRAGMENTADO') {
         return false;
       }
+      if (selectedTypeFilter === 'HIGH_RISK' && !rec.isHighRisk) {
+        return false;
+      }
       // Filter by search query
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase().trim();
@@ -231,21 +253,31 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
     });
   }, [allAuditRecords, selectedRuaFilter, selectedTypeFilter, searchQuery]);
 
+  // High-Risk items count respecting current street filter
+  const highRiskRecordsCount = useMemo(() => {
+    return allAuditRecords.filter(r => {
+      if (selectedRuaFilter !== 'ALL' && r.rua !== selectedRuaFilter) return false;
+      return r.isHighRisk;
+    }).length;
+  }, [allAuditRecords, selectedRuaFilter]);
+
   // Summary KPI statistics
   const summaryKpis = useMemo(() => {
     const totalDiscrepancies = filteredRecords.length;
     const countOverlaps = filteredRecords.filter(r => r.category === 'CONFLITO_SOBREPOSICAO').length;
     const countInvaders = filteredRecords.filter(r => r.category === 'INVASOR_FORA_LOCAL').length;
     const countSplits = filteredRecords.filter(r => r.category === 'SKU_FRAGMENTADO').length;
+    const countHighRisk = highRiskRecordsCount;
     const totalImpactedPieces = filteredRecords.reduce((acc, r) => acc + (r.qty || 1), 0);
     return {
       totalDiscrepancies,
       countOverlaps,
       countInvaders,
       countSplits,
+      countHighRisk,
       totalImpactedPieces
     };
-  }, [filteredRecords]);
+  }, [filteredRecords, highRiskRecordsCount]);
 
   // Export to CSV function
   const handleExportCsv = () => {
@@ -254,6 +286,7 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
     const headers = [
       'RUA',
       'ENDERECO_WMS',
+      'ALTO_RISCO',
       'TIPO_DISCREPANCIA',
       'SKU_COMPLETO',
       'CODIGO_BASE',
@@ -278,6 +311,7 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
       return [
         rec.rua,
         rec.wms,
+        rec.isHighRisk ? 'SIM (Invasor + Conflito)' : 'NAO',
         rec.badgeLabel.replace(/[^\w\s()À-ÿ]/g, '').trim(),
         `"${cleanSku}"`,
         rec.itemRef.codigoBase || rec.skuCode.split(' - ')[0],
@@ -297,7 +331,8 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
 
     // Add UTF-8 BOM so Excel opens with proper accents (ç, ã, etc.)
     const csvContent = '\uFEFF' + [headers.join(';'), ...rows].join('\r\n');
-    const filename = `auditoria_inventario_${selectedRuaFilter === 'ALL' ? 'todas_ruas' : `rua_${selectedRuaFilter}`}_${todayStr}.csv`;
+    const filterTag = selectedTypeFilter === 'HIGH_RISK' ? 'alto_risco_high_risk' : selectedRuaFilter === 'ALL' ? 'todas_ruas' : `rua_${selectedRuaFilter}`;
+    const filename = `auditoria_inventario_${filterTag}_${todayStr}.csv`;
     triggerCsvDownload(csvContent, filename);
   };
 
@@ -445,7 +480,37 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
         {/* ============================================================== */}
         {/* SUMMARY KPI CARDS                                              */}
         {/* ============================================================== */}
-        <div className="p-4 grid grid-cols-2 sm:grid-cols-4 gap-3 bg-white/40 dark:bg-white/[0.02] border-b border-black/10 dark:border-white/10 shrink-0">
+        <div className="p-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 bg-white/40 dark:bg-white/[0.02] border-b border-black/10 dark:border-white/10 shrink-0">
+          {/* HIGH-RISK CARD */}
+          <div
+            onClick={() => setSelectedTypeFilter(prev => prev === 'HIGH_RISK' ? 'ALL' : 'HIGH_RISK')}
+            className={`p-3 rounded-2xl border transition cursor-pointer flex items-center justify-between ${
+              selectedTypeFilter === 'HIGH_RISK'
+                ? 'bg-gradient-to-br from-red-600 to-rose-700 text-white border-red-400 shadow-md ring-2 ring-red-400/50'
+                : 'bg-red-500/10 hover:bg-red-500/15 border-red-500/30'
+            }`}
+            title="Clique para filtrar apenas posições de Alto Risco (Invasor + Conflito)"
+          >
+            <div>
+              <span className={`text-[10px] font-bold uppercase tracking-wider ${
+                selectedTypeFilter === 'HIGH_RISK' ? 'text-white' : 'text-red-600 dark:text-red-400'
+              }`}>
+                🔥 Alto Risco (High-Risk)
+              </span>
+              <div className={`font-mono text-xl font-extrabold mt-0.5 ${
+                selectedTypeFilter === 'HIGH_RISK' ? 'text-white' : 'text-red-700 dark:text-red-200'
+              }`}>
+                {summaryKpis.countHighRisk}
+              </div>
+              <p className={`text-[10px] ${
+                selectedTypeFilter === 'HIGH_RISK' ? 'text-white/80' : 'text-red-600/80 dark:text-red-400/80'
+              }`}>
+                Invasor + Zona Conflito
+              </p>
+            </div>
+            <span className="text-2xl animate-pulse">🔥</span>
+          </div>
+
           <div className="p-3 rounded-2xl bg-rose-500/10 border border-rose-500/25 flex items-center justify-between">
             <div>
               <span className="text-[10px] font-bold uppercase tracking-wider text-rose-600 dark:text-rose-400">
@@ -554,6 +619,28 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
               </button>
               <button
                 type="button"
+                onClick={() => setSelectedTypeFilter('HIGH_RISK')}
+                className={`px-2.5 py-0.5 rounded-lg font-bold transition flex items-center space-x-1 ${
+                  selectedTypeFilter === 'HIGH_RISK'
+                    ? 'bg-gradient-to-r from-red-600 to-rose-600 text-white shadow-xs'
+                    : 'text-red-600 dark:text-red-400 hover:text-red-700 hover:bg-red-500/10'
+                }`}
+                title="Filtrar apenas posições de Alto Risco: contêm item invasor e estão em zona de conflito simultaneamente"
+              >
+                <span>🔥</span>
+                <span>Alto Risco</span>
+                {highRiskRecordsCount > 0 && (
+                  <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-extrabold ${
+                    selectedTypeFilter === 'HIGH_RISK'
+                      ? 'bg-black/30 text-white'
+                      : 'bg-red-500/20 text-red-600 dark:text-red-300'
+                  }`}>
+                    {highRiskRecordsCount}
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
                 onClick={() => setSelectedTypeFilter('CONFLITO')}
                 className={`px-2 py-0.5 rounded-lg font-semibold transition ${
                   selectedTypeFilter === 'CONFLITO'
@@ -623,7 +710,9 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
                 Nenhuma Discrepância Encontrada
               </h3>
               <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mt-1">
-                {selectedRuaFilter !== 'ALL'
+                {selectedTypeFilter === 'HIGH_RISK'
+                  ? 'Nenhuma posição de Alto Risco (possuindo simultaneamente item invasor e zona de conflito) identificada.'
+                  : selectedRuaFilter !== 'ALL'
                   ? `A Rua ${selectedRuaFilter} está em total conformidade sem sobreposições de SKUs ou peças fora do local.`
                   : 'Nenhum conflito de sobreposição ou SKU invasor identificado com os filtros atuais.'}
               </p>
@@ -664,19 +753,39 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
                       return (
                         <tr
                           key={rec.id}
-                          className="hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition"
+                          className={`transition ${
+                            rec.isHighRisk
+                              ? 'bg-red-500/[0.08] dark:bg-red-500/15 hover:bg-red-500/15 dark:hover:bg-red-500/20'
+                              : 'hover:bg-black/[0.02] dark:hover:bg-white/[0.02]'
+                          }`}
                         >
                           {/* Tipo / Diagnóstico */}
-                          <td className="py-3 px-3 align-top min-w-[210px]">
+                          <td className="py-3 px-3 align-top min-w-[220px]">
                             <div className="space-y-1">
-                              <span
-                                className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${rec.badgeClass}`}
-                              >
-                                <span>{rec.icon}</span>
-                                <span>{rec.badgeLabel}</span>
-                              </span>
+                              <div className="flex flex-wrap items-center gap-1">
+                                <span
+                                  className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${rec.badgeClass}`}
+                                >
+                                  <span>{rec.icon}</span>
+                                  <span>{rec.badgeLabel}</span>
+                                </span>
+                                {rec.isHighRisk && (
+                                  <span
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-red-600 text-white border border-red-500 shadow-xs"
+                                    title="Posição de Alto Risco: Contém produto invasor e zona de sobreposição/conflito simultaneamente"
+                                  >
+                                    <span>🔥</span>
+                                    <span>Alto Risco</span>
+                                  </span>
+                                )}
+                              </div>
                               <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-tight">
                                 {rec.diagnostico}
+                                {rec.isHighRisk && (
+                                  <span className="block text-red-600 dark:text-red-400 font-bold text-[10px] mt-0.5">
+                                    ⚡ Atenção Crítica: Célula com produto fora do cadastro em zona de conflito.
+                                  </span>
+                                )}
                               </p>
                             </div>
                           </td>

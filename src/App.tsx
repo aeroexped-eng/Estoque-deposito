@@ -55,6 +55,7 @@ import { AutoSaveModal } from './components/AutoSaveModal';
 import { MovementHistoryModal } from './components/MovementHistoryModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ExecutiveDashboard } from './components/ExecutiveDashboard';
+import { RelocateModal } from './components/RelocateModal';
 
 type WmsPerspective = 'sku' | 'barra';
 type MapMode = 'cards' | 'rack';
@@ -2253,8 +2254,9 @@ export default function App() {
               type="button"
               onClick={() => openRelocateModalWithSku(null)}
               className="hover:bg-black/10 dark:hover:bg-white/15 px-2 py-0.5 rounded transition hidden md:inline-block text-amber-600 dark:text-amber-400 font-semibold"
+              title="Remanejamento Individual ou em Lote via CSV (⌘R)"
             >
-              ⇄ Remanejar SKU
+              ⇄ Remanejar (Lote / SKU)
             </button>
             <button
               type="button"
@@ -2362,7 +2364,7 @@ export default function App() {
                   }}
                   className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex justify-between text-amber-500 font-semibold"
                 >
-                  <span>⇄ Remanejar SKU de Endereço...</span>
+                  <span>⇄ Remanejar (Individual ou Lote CSV)...</span>
                   <span className="font-mono text-[10px] opacity-70">⌘R</span>
                 </button>
                 <button
@@ -4021,7 +4023,10 @@ export default function App() {
                     </button>
                   </div>
                 ) : mapMode === 'cards' ? (
-                  <div className="grid grid-cols-1 min-[420px]:grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-2.5 sm:gap-3">
+                  <div
+                    className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-2.5 sm:gap-3"
+                    style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' }}
+                  >
                     {filteredViewData.slots.map(slot => {
                       const primary = slot.items[0] || null;
                       const isSelected = selectedAddressKey === slot.wms;
@@ -6007,216 +6012,28 @@ export default function App() {
       )}
 
       {/* ==================================================================== */}
-      {/* MODAL 3: RELOCATE SKU (⌘R)                                           */}
+      {/* MODAL 3: RELOCATE SKU & BATCH RELOCATE VIA CSV (⌘R)                  */}
       {/* ==================================================================== */}
-      {showRelocateModal && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="mac-window mac-sheet w-full max-w-lg rounded-2xl overflow-hidden shadow-2xl border border-white/20">
-            <div className="px-5 py-3.5 border-b border-black/10 dark:border-white/10 flex items-center justify-between bg-amber-500/15">
-              <div className="flex items-center space-x-2">
-                <span className="text-lg">⇄</span>
-                <div>
-                  <h3 className="font-display font-bold text-sm">
-                    Remanejar SKU de Endereço
-                  </h3>
-                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                    Move todos os níveis do SKU juntos para outra torre ou rua
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowRelocateModal(false)}
-                className="text-slate-400 hover:text-slate-200 text-sm"
-              >
-                ✕
-              </button>
-            </div>
-
-            <form
-              onSubmit={e => {
-                e.preventDefault();
-                const targetSku =
-                  skus.find(s => s.id === relocateSkuId) ||
-                  skus.find(s => s.code.toUpperCase().includes(relocateSearchInput.toUpperCase()));
-                if (!targetSku) return;
-
-                if (!isValidPositionInStreet(relocateNewRua, relocateNewPos)) {
-                  playMacSound('alert', soundEnabled);
-                  showToast(
-                    `Torre ${relocateNewPos} Inválida na Rua ${relocateNewRua}!`,
-                    getStreetPositionRuleDescription(relocateNewRua),
-                    '🚨'
-                  );
-                  return;
-                }
-
-                const multi = getSkuMultiLevelInfo(targetSku);
-                const levelsToUse =
-                  relocateMoveAllLevels && relocateSelectedLevels.length > 0
-                    ? relocateSelectedLevels
-                    : [relocateNewNivel];
-                const newRawLocal = formatLevelsToSisplanLocal(
-                  relocateNewRua,
-                  relocateNewPos,
-                  levelsToUse
-                );
-                const oldRaw = targetSku.rawLocal || targetSku.wms;
-                const sibIds = new Set(multi.siblingItems.map(s => s.id));
-
-                const nextSkus = skus.map(item => {
-                  if (!sibIds.has(item.id)) return item;
-                  const idx = multi.siblingItems.findIndex(s => s.id === item.id);
-                  const lv = levelsToUse[idx] || levelsToUse[0];
-                  return {
-                    ...item,
-                    lastRelocatedFrom: item.wms,
-                    rua: relocateNewRua,
-                    pos: relocateNewPos,
-                    nivel: lv,
-                    wms: formatWmsAddress(relocateNewRua, relocateNewPos, lv),
-                    rawLocal: newRawLocal,
-                    colecao: isReservedCol35Street(relocateNewRua) ? '35' : item.colecao
-                  };
-                });
-
-                const { nextMoved } = recordSkuMoved(
-                  targetSku,
-                  oldRaw,
-                  newRawLocal,
-                  'relocate',
-                  movedSkusRegistry
-                );
-                setSkus(nextSkus);
-                setMovedSkusRegistry(nextMoved);
-                selectStreet(relocateNewRua);
-                setSelectedAddressKey(formatWmsAddress(relocateNewRua, relocateNewPos, levelsToUse[0]));
-                persistCurrentState(nextSkus, nextMoved, transbordoRegistry);
-                setShowRelocateModal(false);
-                playMacSound('success', soundEnabled);
-                showToast('SKU Remanejado', `${targetSku.code}: ${oldRaw} → ${newRawLocal}`, '⇄');
-              }}
-              className="p-5 space-y-4 text-xs"
-            >
-              <div>
-                <label className="block text-[11px] font-semibold mb-1 text-slate-400">
-                  Selecionar SKU Cadastrado
-                </label>
-                <select
-                  value={relocateSkuId}
-                  onChange={e => {
-                    const id = e.target.value;
-                    setRelocateSkuId(id);
-                    const found = skus.find(s => s.id === id);
-                    if (found) {
-                      const m = getSkuMultiLevelInfo(found);
-                      setRelocateSearchInput(found.code);
-                      setRelocateNewRua(found.rua);
-                      setRelocateNewPos(found.pos);
-                      setRelocateSelectedLevels(m.levels);
-                    }
-                  }}
-                  className="w-full px-3 py-2 rounded-xl bg-black/5 dark:bg-white/10 border border-black/10 dark:border-white/15 font-mono text-xs"
-                >
-                  {skus.slice(0, 300).map(s => (
-                    <option key={s.id} value={s.id}>
-                      {s.wms} — {s.code} ({s.name})
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 space-y-3">
-                <div className="flex items-center justify-between">
-                  <p className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400">
-                    2. Novo Endereço de Destino
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const sug = findMultiLevelFreeColumnInStreet(
-                        relocateNewRua,
-                        Math.max(1, relocateSelectedLevels.length),
-                        relocateNewPos + 1
-                      );
-                      if (sug) {
-                        setRelocateNewPos(sug.pos);
-                        setRelocateSelectedLevels(sug.levels);
-                        setRelocateNewNivel(sug.levels[0]);
-                        playMacSound('pop', soundEnabled);
-                      }
-                    }}
-                    className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white text-[10px] font-semibold"
-                  >
-                    ✨ Sugerir Coluna Livre
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-3 gap-2">
-                  <div>
-                    <label className="block text-[10px] font-semibold mb-1 text-slate-400">
-                      Nova Rua
-                    </label>
-                    <select
-                      value={relocateNewRua}
-                      onChange={e => setRelocateNewRua(e.target.value)}
-                      className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-black/10 dark:border-white/15 font-mono font-bold"
-                    >
-                      {STREETS.map(r => (
-                        <option key={r} value={r}>
-                          Rua {r}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-semibold mb-1 text-slate-400">
-                      Nova Posição
-                    </label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={175}
-                      value={relocateNewPos}
-                      onChange={e => setRelocateNewPos(parseInt(e.target.value, 10) || 1)}
-                      className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-black/10 dark:border-white/15 font-mono font-bold"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-semibold mb-1 text-slate-400">
-                      Nível Principal
-                    </label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={7}
-                      value={relocateNewNivel}
-                      onChange={e => setRelocateNewNivel(parseInt(e.target.value, 10) || 1)}
-                      className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-black/10 dark:border-white/15 font-mono font-bold"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex justify-end space-x-2 pt-2 border-t border-black/10 dark:border-white/10">
-                <button
-                  type="button"
-                  onClick={() => setShowRelocateModal(false)}
-                  className="px-4 py-2 rounded-xl bg-black/5 dark:bg-white/10 font-medium"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold shadow-lg transition"
-                >
-                  Confirmar Remanejamento
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <RelocateModal
+        isOpen={showRelocateModal}
+        onClose={() => setShowRelocateModal(false)}
+        skus={skus}
+        setSkus={setSkus}
+        movedSkusRegistry={movedSkusRegistry}
+        setMovedSkusRegistry={setMovedSkusRegistry}
+        recordSkuMoved={recordSkuMoved}
+        persistCurrentState={persistCurrentState}
+        transbordoRegistry={transbordoRegistry}
+        addressMap={addressMap}
+        selectedStreet={selectedStreet}
+        selectStreet={selectStreet}
+        setSelectedAddressKey={setSelectedAddressKey}
+        soundEnabled={soundEnabled}
+        showToast={showToast}
+        initialSkuId={relocateSkuId}
+        getSkuMultiLevelInfo={getSkuMultiLevelInfo}
+        findMultiLevelFreeColumnInStreet={findMultiLevelFreeColumnInStreet}
+      />
 
       {/* ==================================================================== */}
       {/* MODAL 4: GOOGLE SITES CLOUD SYNC & CLEAN HTML EXPORTER               */}
