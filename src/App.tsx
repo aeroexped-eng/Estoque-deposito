@@ -47,7 +47,11 @@ import {
   generateCleanStandaloneHtml,
   triggerCsvDownload,
   WmsPersistedSnapshot,
-  buildOperatorMisplacedGuideCsv
+  buildOperatorMisplacedGuideCsv,
+  loadStoredImportHistory,
+  saveStoredImportHistory,
+  generateDefaultImportHistory,
+  appendImportHistorySnapshot
 } from './utils/storageAndSync';
 import { ReportModal } from './components/ReportModal';
 import { InventoryAuditModal } from './components/InventoryAuditModal';
@@ -56,6 +60,7 @@ import { MovementHistoryModal } from './components/MovementHistoryModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ExecutiveDashboard } from './components/ExecutiveDashboard';
 import { RelocateModal } from './components/RelocateModal';
+import { ImportHistorySnapshot } from './components/OccupancyEvolutionChart';
 
 type WmsPerspective = 'sku' | 'barra';
 type MapMode = 'cards' | 'rack';
@@ -205,6 +210,11 @@ export default function App() {
   const [csvImportMode, setCsvImportMode] = useState<'merge' | 'replace'>('merge');
   const [csvFileName, setCsvFileName] = useState<string>('Solte seu arquivo .CSV ou clique para selecionar');
   const [rawImportedCsv, setRawImportedCsv] = useState<string>('');
+
+  // Import History for D3 Occupancy Evolution
+  const [importHistory, setImportHistory] = useState<ImportHistorySnapshot[]>(() => {
+    return loadStoredImportHistory();
+  });
 
   // SKU Allocate/Edit Modal State
   const [skuFormEditId, setSkuFormEditId] = useState<string>('');
@@ -862,6 +872,24 @@ export default function App() {
       totalPieces
     };
   }, [skus]);
+
+  // Seed initial import history if empty once streetStats are available
+  useEffect(() => {
+    if (importHistory.length === 0 && Object.keys(streetStats.byStreet).length > 0) {
+      const globalPct =
+        streetStats.grandTotalSlots > 0
+          ? Math.round((streetStats.grandOccupiedSlots / streetStats.grandTotalSlots) * 100)
+          : 0;
+      const initial = generateDefaultImportHistory(
+        streetStats.byStreet,
+        globalPct,
+        totalSkusMetrics.totalPieces,
+        totalSkusMetrics.unique
+      );
+      setImportHistory(initial);
+      saveStoredImportHistory(initial);
+    }
+  }, [importHistory.length, streetStats, totalSkusMetrics]);
 
   // Helper to get all sibling items of a SKU
   const getSkuMultiLevelInfo = useCallback(
@@ -2863,6 +2891,42 @@ export default function App() {
           }
           conflictCount={conflictAnalysis.allConflictSlots.size}
           invaderCount={conflictAnalysis.invaderSlots.size}
+          selectedStreet={selectedStreet}
+          onSelectStreet={selectStreet}
+          importHistory={importHistory}
+          onAddSnapshot={() => {
+            const globalPct =
+              streetStats.grandTotalSlots > 0
+                ? Math.round((streetStats.grandOccupiedSlots / streetStats.grandTotalSlots) * 100)
+                : 0;
+            const updated = appendImportHistorySnapshot(
+              importHistory,
+              streetStats.byStreet,
+              globalPct,
+              totalSkusMetrics.totalPieces,
+              totalSkusMetrics.unique,
+              'Registro Manual'
+            );
+            setImportHistory(updated);
+            playMacSound('success', soundEnabled);
+            showToast('Snapshot Registrado', 'Novo marco gravado no histórico de ocupação D3.', '📈');
+          }}
+          onResetHistory={() => {
+            const globalPct =
+              streetStats.grandTotalSlots > 0
+                ? Math.round((streetStats.grandOccupiedSlots / streetStats.grandTotalSlots) * 100)
+                : 0;
+            const reset = generateDefaultImportHistory(
+              streetStats.byStreet,
+              globalPct,
+              totalSkusMetrics.totalPieces,
+              totalSkusMetrics.unique
+            );
+            setImportHistory(reset);
+            saveStoredImportHistory(reset);
+            playMacSound('pop', soundEnabled);
+            showToast('Histórico Restaurado', 'Curva de evolução D3 redefinida para o padrão.', '🔄');
+          }}
           onNavigateToConflict={navigateToConflict}
           onOpenInventoryAudit={() => setShowAuditModal(true)}
           onExportMisplacedGuide={exportBarraInvadersGuideCsv}
@@ -5650,6 +5714,37 @@ export default function App() {
                       res.barraItems,
                       csvPasteText
                     );
+                    // Snapshot new import in D3 Occupancy Evolution history
+                    try {
+                      const streetMapCounts: Record<string, { pct: number }> = {};
+                      for (const st of STREETS) {
+                        const count = res.skus.filter(s => s.rua === st && !s.isTransbordo).length;
+                        const totalSlots = getTotalSlotsForStreet(st) || 200;
+                        const pct = Math.min(100, Math.round((count / totalSlots) * 100));
+                        streetMapCounts[st] = { pct };
+                      }
+                      const grandTotal = STREETS.reduce((acc, st) => acc + getTotalSlotsForStreet(st), 0) || 1600;
+                      const globalPct = Math.min(100, Math.round((res.skus.filter(s => !s.isTransbordo).length / grandTotal) * 100));
+                      const totalPcs = res.skus
+                        .filter(s => !s.isTransbordo)
+                        .reduce((acc, it) => {
+                          const q = typeof it.qty === 'number' && !isNaN(it.qty) && it.qty > 0 ? it.qty : 1;
+                          return acc + q;
+                        }, 0);
+                      const uniqueSkus = new Set(res.skus.map(s => getCanonicalSkuKey(s.code))).size;
+                      const updatedHist = appendImportHistorySnapshot(
+                        importHistory,
+                        streetMapCounts,
+                        globalPct,
+                        totalPcs,
+                        uniqueSkus,
+                        csvFileName && csvFileName !== 'Solte seu arquivo .CSV ou clique para selecionar' ? csvFileName : undefined
+                      );
+                      setImportHistory(updatedHist);
+                    } catch (e) {
+                      console.warn('Erro ao atualizar histórico D3:', e);
+                    }
+
                     setShowImportModal(false);
                     playMacSound('success', soundEnabled);
                     showToast(

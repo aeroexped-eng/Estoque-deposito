@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { OccupancyEvolutionChart, ImportHistorySnapshot } from './OccupancyEvolutionChart';
 
 export interface ExecutiveDashboardProps {
   totalSkusCount: {
@@ -12,6 +13,11 @@ export interface ExecutiveDashboardProps {
   occupancyPercentage: number;
   conflictCount: number;
   invaderCount?: number;
+  selectedStreet?: string;
+  onSelectStreet?: (rua: string) => void;
+  importHistory?: ImportHistorySnapshot[];
+  onAddSnapshot?: () => void;
+  onResetHistory?: () => void;
   onNavigateToConflict?: () => void;
   onOpenInventoryAudit?: () => void;
   onExportMisplacedGuide?: () => void;
@@ -32,6 +38,11 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
   occupancyPercentage,
   conflictCount,
   invaderCount = 0,
+  selectedStreet = 'RF',
+  onSelectStreet,
+  importHistory,
+  onAddSnapshot,
+  onResetHistory,
   onNavigateToConflict,
   onOpenInventoryAudit,
   onExportMisplacedGuide,
@@ -42,6 +53,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
   onToggleExpanded,
   onClose
 }) => {
+  const [showEvolutionChart, setShowEvolutionChart] = useState<boolean>(true);
   // Format numbers to Brazilian Portuguese locale
   const fmt = (n: number) => n.toLocaleString('pt-BR');
 
@@ -121,6 +133,23 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
               </button>
             )}
 
+            {importHistory && importHistory.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowEvolutionChart(prev => !prev)}
+                className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold transition flex items-center gap-1 border ${
+                  showEvolutionChart
+                    ? 'bg-blue-600/20 text-blue-700 dark:text-blue-300 border-blue-500/40 ring-1 ring-blue-500/40'
+                    : 'bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 text-slate-600 dark:text-slate-300 border-black/5 dark:border-white/10'
+                }`}
+                title="Alternar exibição do gráfico D3 de evolução de ocupação da rua selecionada"
+              >
+                <span>📈</span>
+                <span className="hidden sm:inline">Gráfico D3:</span>
+                <span>{showEvolutionChart ? 'ON' : 'OFF'}</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={onToggleExpanded}
@@ -144,9 +173,10 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
           </div>
         </div>
 
-        {/* EXPANDED VIEW: 4 High-Impact Executive Cards */}
+        {/* EXPANDED VIEW: 4 High-Impact Executive Cards & D3 Evolution Chart */}
         {isExpanded ? (
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3 pt-1">
+          <>
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3 pt-1">
             {/* CARD 1: Total de SKUs */}
             <div
               onClick={onOpenSpotlight}
@@ -372,7 +402,19 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
               </div>
             </div>
           </div>
-        ) : (
+
+          {/* D3 OCCUPANCY EVOLUTION CHART */}
+          {showEvolutionChart && importHistory && importHistory.length > 0 && (
+            <OccupancyEvolutionChart
+              selectedStreet={selectedStreet}
+              onSelectStreet={onSelectStreet}
+              importHistory={importHistory}
+              onAddSnapshot={onAddSnapshot}
+              onResetHistory={onResetHistory}
+            />
+          )}
+        </>
+      ) : (
           /* COMPACT VIEW: Slim 1-Line Summary Bar */
           <div className="flex items-center justify-between gap-2 overflow-x-auto no-scrollbar py-1 text-xs">
             <div className="flex items-center space-x-2 sm:space-x-3 shrink-0">
