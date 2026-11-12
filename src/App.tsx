@@ -164,6 +164,8 @@ export default function App() {
   const [showRelocateModal, setShowRelocateModal] = useState<boolean>(false);
   const [showCloudModal, setShowCloudModal] = useState<boolean>(false);
   const [showSpotlight, setShowSpotlight] = useState<boolean>(false);
+  const [spotlightTargetWms, setSpotlightTargetWms] = useState<string | null>(null);
+  const spotlightHighlightTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [showAboutModal, setShowAboutModal] = useState<boolean>(false);
   const [showReportModal, setShowReportModal] = useState<boolean>(false);
   const [showAuditModal, setShowAuditModal] = useState<boolean>(false);
@@ -2157,39 +2159,139 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [spotlightQuery, showSpotlight, soundEnabled, spotlightSoundEnabled, filteredSpotlightItems.length]);
 
+  // Scroll and focus on a specific WMS slot
+  const scrollToWmsSlot = useCallback((wms: string, rua?: string, pos?: number) => {
+    const cleanId = wms.replace(/\./g, '-');
+    const attemptScroll = () => {
+      const targetEl =
+        document.getElementById(`wms-card-${cleanId}`) ||
+        document.getElementById(`wms-cell-${cleanId}`) ||
+        document.getElementById(`wms-cell-matrix-${cleanId}`) ||
+        document.querySelector(`[data-wms="${wms}"]`) ||
+        (rua && pos ? document.getElementById(`wms-tower-${rua}-${pos}`) : null);
+
+      if (targetEl) {
+        targetEl.scrollIntoView({
+          behavior: 'smooth',
+          block: 'center',
+          inline: 'center'
+        });
+        return true;
+      }
+      return false;
+    };
+
+    // Staggered attempts to guarantee execution after React DOM paint
+    if (!attemptScroll()) {
+      const t1 = setTimeout(() => {
+        if (!attemptScroll()) {
+          const t2 = setTimeout(attemptScroll, 120);
+          return () => clearTimeout(t2);
+        }
+      }, 50);
+      return () => clearTimeout(t1);
+    }
+  }, []);
+
   const executeSpotlightSelection = useCallback((s: SkuItem) => {
-    selectStreet(s.rua);
+    // 1. Defina a rua e o macro-setor correto
+    setSelectedStreet(s.rua);
+    if (isAccessoriesStreet(s.rua)) setMacroSectorFilter('acessorios');
+    else if (isPulmaoStreet(s.rua)) setMacroSectorFilter('pulmao');
+    else setMacroSectorFilter('ruas_all');
+
+    // 2. Limpe filtros restritivos para garantir que o endereço estará visível na tela
+    setOccupancyFilter('ALL');
+    setSelectedLevel('ALL');
+    setCollectionFilter('ALL');
+    setSearchQuery('');
+    setRackTowerFilter('ALL');
+
+    // 3. Focar na sub-faixa de 20 posições correspondente (ou 'ALL' caso não se aplique)
+    const targetRange = ADDRESS_RANGES.find(
+      r => !r.id.startsWith('ALL') && s.pos >= r.start && s.pos <= r.end
+    );
+    setSelectedRangeId(targetRange ? targetRange.id : 'ALL');
+
+    // 4. Selecionar o endereço e SKU
     setSelectedAddressKey(s.wms);
     setSelectedSkuId(s.id);
-    setSelectedRangeId('ALL-OCCUPIED');
+
+    // 5. Garantir que o painel Inspetor de detalhes esteja aberto
+    setInspectorCollapsedDesktop(false);
+    setInspectorOpenMobile(true);
+
+    // 6. Fechar modal do Spotlight
     setShowSpotlight(false);
+
+    // 7. Ativar o halo/beacon de destaque temporário para atrair o olhar
+    setSpotlightTargetWms(s.wms);
+    if (spotlightHighlightTimerRef.current) {
+      clearTimeout(spotlightHighlightTimerRef.current);
+    }
+    spotlightHighlightTimerRef.current = setTimeout(() => {
+      setSpotlightTargetWms(null);
+    }, 5000);
+
+    // 8. Rolar suavemente a tela diretamente até o card ou célula de porta-paletes
+    scrollToWmsSlot(s.wms, s.rua, s.pos);
+
+    // 9. Feedback sonoro e notificação visual com detalhes completos
     playMacSound('select', soundEnabled && spotlightSoundEnabled);
-    showToast('Endereço Localizado', `${s.code} em ${s.wms} (${s.rua})`, '📍');
-  }, [selectStreet, setSelectedAddressKey, setSelectedSkuId, setSelectedRangeId, soundEnabled, spotlightSoundEnabled, showToast]);
+    showToast(
+      'Endereço Localizado!',
+      `${s.code} • ${s.wms} (Rua ${s.rua}, Torre ${String(s.pos).padStart(3, '0')}, Nível ${s.nivel})`,
+      '🎯'
+    );
+  }, [
+    scrollToWmsSlot,
+    soundEnabled,
+    spotlightSoundEnabled,
+    showToast
+  ]);
 
   // Movement History Handlers
   const handleNavigateFromHistory = useCallback((wms: string, rua: string) => {
     setShowMovementHistoryModal(false);
     setSelectedStreet(rua);
+    if (isAccessoriesStreet(rua)) setMacroSectorFilter('acessorios');
+    else if (isPulmaoStreet(rua)) setMacroSectorFilter('pulmao');
+    else setMacroSectorFilter('ruas_all');
+
+    setOccupancyFilter('ALL');
+    setSelectedLevel('ALL');
+    setCollectionFilter('ALL');
+    setSearchQuery('');
+    setRackTowerFilter('ALL');
+
     const parts = wms.split('.');
     const pos = parseInt(parts[1], 10);
     if (!isNaN(pos)) {
-      if (pos >= 1 && pos <= 20) setSelectedRangeId('1-20');
-      else if (pos >= 21 && pos <= 40) setSelectedRangeId('21-40');
-      else if (pos >= 41 && pos <= 60) setSelectedRangeId('41-60');
-      else if (pos >= 61 && pos <= 80) setSelectedRangeId('61-80');
-      else if (pos >= 81 && pos <= 100) setSelectedRangeId('81-100');
-      else if (pos >= 101 && pos <= 120) setSelectedRangeId('101-120');
-      else if (pos >= 121 && pos <= 140) setSelectedRangeId('121-140');
-      else setSelectedRangeId('ALL-OCCUPIED');
+      const targetRange = ADDRESS_RANGES.find(
+        r => !r.id.startsWith('ALL') && pos >= r.start && pos <= r.end
+      );
+      setSelectedRangeId(targetRange ? targetRange.id : 'ALL');
+    } else {
+      setSelectedRangeId('ALL-OCCUPIED');
     }
     setSelectedAddressKey(wms);
     const items = addressMap.get(wms) || [];
     if (items[0]) setSelectedSkuId(items[0].id);
     setInspectorOpenMobile(true);
     setInspectorCollapsedDesktop(false);
+
+    setSpotlightTargetWms(wms);
+    if (spotlightHighlightTimerRef.current) {
+      clearTimeout(spotlightHighlightTimerRef.current);
+    }
+    spotlightHighlightTimerRef.current = setTimeout(() => {
+      setSpotlightTargetWms(null);
+    }, 5000);
+
+    scrollToWmsSlot(wms, rua, !isNaN(pos) ? pos : undefined);
+    playMacSound('select', soundEnabled);
     showToast(`Endereço ${wms} Selecionado`, `Localizado na Rua ${rua}.`, '🎯');
-  }, [addressMap, showToast]);
+  }, [addressMap, showToast, scrollToWmsSlot, soundEnabled]);
 
   const handleRevertMovement = useCallback((skuKey: string) => {
     const entry = movedSkusRegistry[skuKey];
@@ -4094,6 +4196,7 @@ export default function App() {
                     {filteredViewData.slots.map(slot => {
                       const primary = slot.items[0] || null;
                       const isSelected = selectedAddressKey === slot.wms;
+                      const isSpotlightTarget = spotlightTargetWms === slot.wms;
                       const isTrbSelected = transbordoSelectedWms.includes(slot.wms);
                       const isLowGreen = highlightLowStockGreen && slot.isLowStock && !slot.isTransbordo;
                       const totalSlotQty = slot.items
@@ -4103,6 +4206,8 @@ export default function App() {
                       return (
                         <div
                           key={slot.wms}
+                          id={`wms-card-${slot.wms.replace(/\./g, '-')}`}
+                          data-wms={slot.wms}
                           draggable={Boolean(primary && !slot.isTransbordo)}
                           onDragStart={() => {
                             if (primary && !slot.isTransbordo) {
@@ -4147,7 +4252,7 @@ export default function App() {
                               }
                             }
                           }}
-                          className={`mac-card rounded-2xl p-3 cursor-pointer flex flex-col justify-between min-h-[120px] relative ${
+                          className={`mac-card rounded-2xl p-3 cursor-pointer flex flex-col justify-between min-h-[120px] relative transition-all duration-300 ${
                             slot.isTransbordo
                               ? 'transbordo-card'
                               : isLowGreen
@@ -4163,21 +4268,42 @@ export default function App() {
                                     : primary
                                       ? 'border-emerald-500/35 bg-emerald-500/[0.04]'
                                       : ''
-                          } ${isSelected ? 'ring-2 ring-mac-blue shadow-lg' : ''} ${
+                          } ${
+                            isSpotlightTarget
+                              ? 'ring-4 ring-amber-400 dark:ring-amber-300 ring-offset-2 ring-offset-white dark:ring-offset-slate-900 shadow-2xl scale-[1.03] z-20 animate-pulse bg-amber-500/15'
+                              : isSelected
+                                ? 'ring-2 ring-mac-blue shadow-lg'
+                                : ''
+                          } ${
                             isTrbSelected ? 'transbordo-selected-slot' : ''
                           } ${dragOverKey === slot.wms ? 'ring-2 ring-purple-500 scale-[1.02]' : ''}`}
                         >
+                          {/* Spotlight Target Active Beacon Banner */}
+                          {isSpotlightTarget && (
+                            <div className="mb-2 px-2.5 py-1 rounded-xl bg-gradient-to-r from-amber-400 via-amber-500 to-orange-500 text-slate-950 font-black text-[10px] sm:text-[11px] flex items-center justify-between shadow-md">
+                              <span className="flex items-center gap-1.5">
+                                <span className="w-2 h-2 rounded-full bg-slate-950 animate-ping inline-block" />
+                                <span>🎯 LOCALIZADO NO SPOTLIGHT</span>
+                              </span>
+                              <span className="font-mono text-[9px] uppercase px-1.5 py-0.2 rounded bg-black/20 text-slate-950 font-extrabold">
+                                Foco Ativo
+                              </span>
+                            </div>
+                          )}
+
                           {/* Top Row: WMS Address Badge + Status */}
                           <div className="flex items-center justify-between gap-1">
                             <span
                               className={`font-mono text-xs font-extrabold px-2 py-0.5 rounded-md ${
-                                slot.isTransbordo
-                                  ? 'bg-yellow-400 text-slate-950 border border-yellow-600'
-                                  : slot.isConflict
-                                    ? 'bg-rose-600 text-white'
-                                    : primary
-                                      ? 'bg-mac-blue text-white'
-                                      : 'bg-black/10 dark:bg-white/10 text-slate-600 dark:text-slate-300'
+                                isSpotlightTarget
+                                  ? 'bg-amber-400 text-slate-950 font-black shadow'
+                                  : slot.isTransbordo
+                                    ? 'bg-yellow-400 text-slate-950 border border-yellow-600'
+                                    : slot.isConflict
+                                      ? 'bg-rose-600 text-white'
+                                      : primary
+                                        ? 'bg-mac-blue text-white'
+                                        : 'bg-black/10 dark:bg-white/10 text-slate-600 dark:text-slate-300'
                               }`}
                             >
                               {slot.wms}
@@ -4422,10 +4548,20 @@ export default function App() {
                                 }
                               });
 
+                              const hasSpotlightInTower = Boolean(
+                                spotlightTargetWms &&
+                                spotlightTargetWms.startsWith(`${selectedStreet}.${String(pos).padStart(3, '0')}.`)
+                              );
+
                               return (
                                 <div
                                   key={pos}
-                                  className="mac-card rounded-2xl overflow-hidden border border-black/10 dark:border-white/10 shadow-sm flex flex-col bg-white/60 dark:bg-slate-900/40 hover:border-mac-blue/40 transition"
+                                  id={`wms-tower-${selectedStreet}-${pos}`}
+                                  className={`mac-card rounded-2xl overflow-hidden border shadow-sm flex flex-col bg-white/60 dark:bg-slate-900/40 hover:border-mac-blue/40 transition-all duration-300 ${
+                                    hasSpotlightInTower
+                                      ? 'border-amber-400 dark:border-amber-300 ring-2 ring-amber-400/50 shadow-xl'
+                                      : 'border-black/10 dark:border-white/10'
+                                  }`}
                                 >
                                   {/* Tower Top Header */}
                                   <div className="px-3 py-2 bg-black/[0.03] dark:bg-white/[0.04] border-b border-black/10 dark:border-white/10 flex items-center justify-between">
@@ -4436,6 +4572,11 @@ export default function App() {
                                       <span className="font-mono text-[10px] text-mac-blue font-bold px-1.5 py-0.2 rounded bg-mac-blue/10">
                                         {maxLvTower} Andares
                                       </span>
+                                      {hasSpotlightInTower && (
+                                        <span className="font-mono text-[9px] font-black px-1.5 py-0.2 rounded bg-amber-500 text-slate-950 animate-pulse">
+                                          🎯 FOCO
+                                        </span>
+                                      )}
                                     </div>
                                     <div className="flex items-center gap-1 text-[10px] font-mono">
                                       {towerAlerts > 0 ? (
@@ -4458,6 +4599,7 @@ export default function App() {
                                       const items = addressMap.get(wms) || [];
                                       const primary = items[0] || null;
                                       const isSelected = selectedAddressKey === wms;
+                                      const isSpotlightTarget = spotlightTargetWms === wms;
                                       const isTrb = Boolean(transbordoRegistry[wms]);
                                       const isTrbSelected = transbordoSelectedWms.includes(wms);
                                       const isLow = highlightLowStockGreen && conflictAnalysis.lowStockSlots.has(wms) && !isTrb;
@@ -4470,6 +4612,8 @@ export default function App() {
                                       return (
                                         <div
                                           key={lv}
+                                          id={`wms-cell-${wms.replace(/\./g, '-')}`}
+                                          data-wms={wms}
                                           draggable={Boolean(primary && !isTrb)}
                                           onDragStart={() => {
                                             if (primary && !isTrb) {
@@ -4507,9 +4651,11 @@ export default function App() {
                                                       ? 'bg-emerald-500/10 border-emerald-500/35 hover:border-emerald-500 text-emerald-950 dark:text-emerald-100'
                                                       : 'bg-black/[0.02] dark:bg-white/[0.02] border-dashed border-black/15 dark:border-white/15 hover:border-mac-blue text-slate-400'
                                           } ${
-                                            isSelected
-                                              ? 'ring-2 ring-mac-blue shadow-md border-mac-blue bg-mac-blue/10'
-                                              : ''
+                                            isSpotlightTarget
+                                              ? 'ring-4 ring-amber-400 dark:ring-amber-300 ring-offset-2 ring-offset-white dark:ring-offset-slate-900 shadow-xl scale-[1.03] z-20 bg-amber-400/25 text-amber-950 dark:text-amber-100 font-black'
+                                              : isSelected
+                                                ? 'ring-2 ring-mac-blue shadow-md border-mac-blue bg-mac-blue/10'
+                                                : ''
                                           } ${isTrbSelected ? 'transbordo-selected-slot' : ''} ${
                                             dragOverKey === wms
                                               ? 'ring-2 ring-purple-500 scale-[1.02]'
@@ -4656,6 +4802,7 @@ export default function App() {
                                           const items = existsAtThisTower ? addressMap.get(wms) || [] : [];
                                           const primary = items[0] || null;
                                           const isSelected = selectedAddressKey === wms;
+                                          const isSpotlightTarget = spotlightTargetWms === wms;
                                           const isTrb = Boolean(transbordoRegistry[wms]);
                                           const isTrbSelected = transbordoSelectedWms.includes(wms);
                                           const isLow =
@@ -4687,6 +4834,8 @@ export default function App() {
                                               className="p-1 border-r border-black/5 dark:border-white/5"
                                             >
                                               <div
+                                                id={`wms-cell-matrix-${wms.replace(/\./g, '-')}`}
+                                                data-wms={wms}
                                                 draggable={Boolean(primary && !isTrb)}
                                                 onDragStart={() => {
                                                   if (primary && !isTrb) {
@@ -4724,9 +4873,11 @@ export default function App() {
                                                             ? 'bg-emerald-500/15 border border-emerald-500/40 text-emerald-900 dark:text-emerald-200'
                                                             : 'bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 hover:border-mac-blue text-slate-400'
                                                 } ${
-                                                  isSelected
-                                                    ? 'ring-2 ring-mac-blue shadow-md border-mac-blue'
-                                                    : ''
+                                                  isSpotlightTarget
+                                                    ? 'ring-4 ring-amber-400 dark:ring-amber-300 ring-offset-1 shadow-xl scale-105 z-20 bg-amber-400/30 border-amber-400 text-slate-950 dark:text-white font-bold'
+                                                    : isSelected
+                                                      ? 'ring-2 ring-mac-blue shadow-md border-mac-blue'
+                                                      : ''
                                                 } ${isTrbSelected ? 'transbordo-selected-slot' : ''} ${
                                                   dragOverKey === wms
                                                     ? 'ring-2 ring-purple-500 scale-[1.04]'
