@@ -1966,6 +1966,32 @@ export default function App() {
     );
   };
 
+  const exportAllMapAddressesCsv = useCallback(() => {
+    const lines = ['ENDERECO'];
+    let count = 0;
+
+    for (const rua of STREETS) {
+      const validPositions = getValidPositionsForStreet(rua);
+      for (const pos of validPositions) {
+        const maxLv = getMaxLevelsForStreet(rua, pos);
+        for (let lv = 1; lv <= maxLv; lv++) {
+          lines.push(formatWmsAddress(rua, pos, lv));
+          count++;
+        }
+      }
+    }
+
+    const csvContent = lines.join('\n') + '\n';
+    const dateStr = new Date().toISOString().slice(0, 10);
+    triggerCsvDownload(csvContent, `enderecos_mapa_wms_completo_${dateStr}.csv`);
+    playMacSound('success', soundEnabled);
+    showToast(
+      'Lista de Endereços Exportada',
+      `${count} endereços presentes no mapa exportados com sucesso em CSV.`,
+      '📍'
+    );
+  }, [soundEnabled, showToast]);
+
   // ============================================================================
   // OPEN SKU MODAL / RELOCATE MODAL HELPERS
   // ============================================================================
@@ -2646,6 +2672,21 @@ export default function App() {
                 >
                   <span>📄 Exportar CSV Detalhado (1 Nível/Linha)</span>
                   <span className="font-mono text-[10px] opacity-70">CSV</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpenMenu(null);
+                    exportAllMapAddressesCsv();
+                  }}
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-emerald-600 hover:text-white transition flex justify-between text-emerald-600 dark:text-emerald-400 font-bold"
+                  title="Exportar lista de todos os endereços presentes no mapa (apenas os endereços: RA.001.1, RA.001.2...)"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>📍</span>
+                    <span>Exportar Lista de Endereços (.CSV)</span>
+                  </span>
+                  <span className="font-mono text-[10px] opacity-80">Apenas Endereços</span>
                 </button>
                 <button
                   type="button"
