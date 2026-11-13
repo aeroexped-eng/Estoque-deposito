@@ -521,29 +521,134 @@ export function formatCanonicalSkuDisplay(rawSkuStr: string | null | undefined):
   return raw;
 }
 
-export function decodeSkuPrefix(rawCode: string, explicitColor = '', explicitSize = '') {
+export function normalizeSearchText(str: string | null | undefined): string {
+  return String(str || '')
+    .trim()
+    .toUpperCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+export interface ParsedFullSku {
+  baseDigits: string;
+  hasBrand: boolean;
+  hasLabel: boolean;
+  hasGroup: boolean;
+  hasSeq: boolean;
+  hasColor: boolean;
+  hasSize: boolean;
+  dMarca: string;
+  dEtiqueta: string;
+  dGrupo: string;
+  seqRaw: string;
+  modelSeq: string;
+  colorCode: string;
+  size: string;
+  isComplete: boolean;
+}
+
+export function parseFullSkuString(rawCode: string): ParsedFullSku {
   const str = String(rawCode || '').trim().toUpperCase();
-  const parts = str.split(/\s*-\s*/);
-  const baseDigits = (parts[0] || str).replace(/\D/g, '');
+  if (!str) {
+    return {
+      baseDigits: '',
+      hasBrand: false,
+      hasLabel: false,
+      hasGroup: false,
+      hasSeq: false,
+      hasColor: false,
+      hasSize: false,
+      dMarca: '1',
+      dEtiqueta: '1',
+      dGrupo: '06',
+      seqRaw: '',
+      modelSeq: '0001',
+      colorCode: '101',
+      size: 'U',
+      isComplete: false
+    };
+  }
+
+  // Split by '-' or ';' or whitespace
+  const parts = str.split(/\s*[-;]\s*|\s+/).filter(Boolean);
+  let baseToken = parts[0] || '';
+  let colorToken = parts[1] || '';
+  let sizeToken = parts.slice(2).join('').trim();
+
+  // Support compact glued input like "11060127102M" or "11060127102GG"
+  if (parts.length === 1) {
+    const compactMatch = baseToken.match(/^(\d{8})(\d{3})([A-Z0-9]+)?$/);
+    if (compactMatch) {
+      baseToken = compactMatch[1];
+      colorToken = compactMatch[2];
+      sizeToken = compactMatch[3] || '';
+    }
+  }
+
+  const baseDigits = baseToken.replace(/\D/g, '');
+  const hasBrand = baseDigits.length >= 1;
+  const hasLabel = baseDigits.length >= 2;
+  const hasGroup = baseDigits.length >= 4;
+  const hasSeq = baseDigits.length >= 5;
 
   const dMarca = baseDigits.charAt(0) || '1';
   const dEtiqueta = baseDigits.charAt(1) || '1';
   const dGrupoRaw = baseDigits.substring(2, 4) || '06';
   const dGrupo = dGrupoRaw.padStart(2, '0');
-  const modelSeq = baseDigits.substring(4, 8) || '0001';
+  const seqRaw = baseDigits.substring(4, 8);
+  const modelSeq = (seqRaw || '0001').padStart(4, '0');
 
-  const marca = AERO_BRANDS[dMarca] || 'Aero';
-  const etiqueta = AERO_LABELS[dEtiqueta] || 'Masculino';
+  const colorDigits = colorToken.replace(/\D/g, '');
+  const hasColor = colorDigits.length > 0;
+  const colorCode = hasColor ? colorDigits.padStart(3, '0') : '';
+
+  const cleanSize = sizeToken.trim().toUpperCase();
+  const hasSize = cleanSize.length > 0;
+
+  return {
+    baseDigits,
+    hasBrand,
+    hasLabel,
+    hasGroup,
+    hasSeq,
+    hasColor,
+    hasSize,
+    dMarca,
+    dEtiqueta,
+    dGrupo,
+    seqRaw,
+    modelSeq,
+    colorCode,
+    size: cleanSize,
+    isComplete: baseDigits.length >= 8 && hasColor && hasSize
+  };
+}
+
+export function decodeSkuPrefix(rawCode: string, explicitColor = '', explicitSize = '') {
+  const parsed = parseFullSkuString(rawCode);
+
+  const dMarca = parsed.dMarca;
+  const dEtiqueta = parsed.dEtiqueta;
+  const dGrupo = parsed.dGrupo;
+  const modelSeq = parsed.modelSeq;
+
+  const marca = AERO_BRANDS[dMarca] || `Marca ${dMarca}`;
+  const etiqueta = AERO_LABELS[dEtiqueta] || `Etiqueta ${dEtiqueta}`;
   const groupObj =
     AERO_GROUPS[dGrupo] ||
     AERO_GROUPS[String(parseInt(dGrupo, 10))] ||
     { name: `Grupo ${dGrupo}`, icon: '📦' };
 
-  const colorCode = String(explicitColor || parts[1] || '101').trim().padStart(3, '0');
-  const size = String(explicitSize || parts[2] || 'U').trim().toUpperCase();
+  // Prefer parsed color/size embedded inside rawCode; only fall back to explicitColor/explicitSize when missing
+  const resolvedColor = parsed.hasColor
+    ? parsed.colorCode
+    : String(explicitColor || '101').trim().replace(/\D/g, '').padStart(3, '0') || '101';
+  const resolvedSize = parsed.hasSize
+    ? parsed.size
+    : String(explicitSize || 'U').trim().toUpperCase() || 'U';
 
-  const colorObj = OFFICIAL_COLORS[colorCode] || {
-    name: `Cor ${colorCode}`,
+  const colorObj = OFFICIAL_COLORS[resolvedColor] || {
+    name: `Cor ${resolvedColor}`,
     hex: '#64748B',
     border: '#475569'
   };
@@ -557,12 +662,12 @@ export function decodeSkuPrefix(rawCode: string, explicitColor = '', explicitSiz
     etiqueta,
     grupo: groupObj.name,
     icon: groupObj.icon,
-    colorCode,
+    colorCode: resolvedColor,
     colorName: colorObj.name,
     colorHex: colorObj.hex,
     colorBorder: colorObj.border,
-    size,
-    autoName: `${groupObj.name} ${marca} ${etiqueta} • ${colorObj.name} (${size})`
+    size: resolvedSize,
+    autoName: `${groupObj.name} ${marca} ${etiqueta} • Ref. ${modelSeq} • ${colorObj.name} (${resolvedSize})`
   };
 }
 

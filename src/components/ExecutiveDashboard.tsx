@@ -100,22 +100,22 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
       aria-label="Dashboard Executivo de Estoque"
       className="w-full shrink-0 z-30 select-none bg-white/80 dark:bg-slate-900/85 backdrop-blur-md border-b border-black/10 dark:border-white/10 transition-all duration-300 shadow-xs"
     >
-      <div className="w-full px-3 sm:px-5 py-2">
+      <div className="w-full px-2.5 sm:px-5 py-1.5 sm:py-2">
         {/* Header bar of the dashboard with title and collapse toggle */}
-        <div className="flex items-center justify-between pb-1 text-[11px] font-medium text-slate-500 dark:text-slate-400">
-          <div className="flex items-center space-x-2">
-            <span className="inline-flex items-center justify-center w-5 h-5 rounded-md bg-mac-blue/15 text-mac-blue text-xs font-bold">
+        <div className="flex flex-wrap items-center justify-between gap-1.5 pb-1 text-[11px] font-medium text-slate-500 dark:text-slate-400">
+          <div className="flex items-center space-x-1.5 sm:space-x-2 min-w-0">
+            <span className="inline-flex items-center justify-center w-5 h-5 rounded-md bg-mac-blue/15 text-mac-blue text-xs font-bold shrink-0">
               📊
             </span>
-            <span className="font-display font-bold tracking-tight text-slate-800 dark:text-slate-200 uppercase text-[10px] sm:text-[11px]">
+            <span className="font-display font-bold tracking-tight text-slate-800 dark:text-slate-200 uppercase text-[10px] sm:text-[11px] truncate">
               Dashboard Executivo
             </span>
-            <span className="text-[10px] text-slate-400 hidden md:inline">
+            <span className="text-[10px] text-slate-400 hidden md:inline truncate">
               • Indicadores Globais do Armazém em Tempo Real
             </span>
           </div>
 
-          <div className="flex items-center space-x-1.5 sm:space-x-2">
+          <div className="flex items-center flex-wrap gap-1 sm:gap-2">
             {onToggleHeatmap && (
               <button
                 type="button"
@@ -176,7 +176,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
         {/* EXPANDED VIEW: 4 High-Impact Executive Cards & D3 Evolution Chart */}
         {isExpanded ? (
           <>
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3 pt-1">
+            <div className="grid grid-cols-1 min-[380px]:grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3 pt-1">
             {/* CARD 1: Total de SKUs */}
             <div
               onClick={onOpenSpotlight}
@@ -354,7 +354,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
                         ? `${fmt(invaderCount)} invasores fora do local`
                         : 'Sobreposições / SKUs divididos'}
                     </span>
-                    <div className="flex items-center gap-1 shrink-0">
+                    <div className="flex items-center flex-wrap justify-end gap-1 shrink-0">
                       {onNavigateToConflict && (
                         <button
                           type="button"

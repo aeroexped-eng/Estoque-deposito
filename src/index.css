@@ -46,6 +46,11 @@ input, textarea, select {
   user-select: text;
 }
 
+button, [role="button"] {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
 /* Travamento absoluto da página/iframe para NUNCA ser jogada para cima no Google Sites */
 html, body, #root {
   position: fixed !important;
@@ -56,14 +61,17 @@ html, body, #root {
   bottom: 0 !important;
   width: 100% !important;
   height: 100% !important;
+  height: 100dvh !important;
   max-width: 100% !important;
   max-height: 100% !important;
+  max-height: 100dvh !important;
   margin: 0 !important;
   padding: 0 !important;
   overflow: hidden !important;
   overflow: clip !important;
   overscroll-behavior: none !important;
   overflow-anchor: none !important;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* Mobile touch ergonomics & safe-area insets */
@@ -141,12 +149,14 @@ html.dark .wallpaper-sequoia {
 .mac-card {
   background: var(--card-bg);
   border: 1px solid var(--glass-border);
-  transition: all 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: transform 0.16s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
 }
 
-.mac-card:hover {
-  border-color: rgba(10, 132, 255, 0.42);
-  transform: translateY(-1px);
+@media (hover: hover) and (pointer: fine) {
+  .mac-card:hover {
+    border-color: rgba(10, 132, 255, 0.42);
+    transform: translateY(-1px);
+  }
 }
 
 .mac-menubar {
@@ -178,10 +188,12 @@ html.dark .mac-dock {
   transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), margin 0.2s ease;
 }
 
-.dock-item:hover {
-  transform: translateY(-7px) scale(1.15);
-  margin-left: 3px;
-  margin-right: 3px;
+@media (hover: hover) and (pointer: fine) {
+  .dock-item:hover {
+    transform: translateY(-7px) scale(1.15);
+    margin-left: 3px;
+    margin-right: 3px;
+  }
 }
 
 .traffic-group:hover .traffic-icon {
@@ -228,6 +240,22 @@ html.dark .mac-dock {
 }
 [draggable="true"]:active {
   cursor: grabbing;
+}
+
+.drag-source-active {
+  opacity: 0.45 !important;
+  transform: scale(0.97) !important;
+  border-style: dashed !important;
+  border-color: rgba(168, 85, 247, 0.7) !important;
+}
+
+.drop-target-hover {
+  outline: 2.5px dashed #9333ea !important;
+  outline-offset: 2px;
+  background-color: rgba(168, 85, 247, 0.12) !important;
+  box-shadow: 0 0 0 4px rgba(168, 85, 247, 0.18), 0 10px 24px -6px rgba(147, 51, 234, 0.35) !important;
+  transform: scale(1.02);
+  z-index: 15;
 }
 
 /* Colmeias de Transbordo (Mini Pulmão dentro da Rua • Amarelo Vivo de Bloqueio Visual) */

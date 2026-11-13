@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue } from 'react';
 import {
   STREETS,
   STREET_META,
@@ -27,6 +27,8 @@ import {
   getCanonicalSkuKey,
   formatCanonicalSkuDisplay,
   decodeSkuPrefix,
+  parseFullSkuString,
+  normalizeSearchText,
   getHeatmapColorInfo,
   HeatmapColorInfo
 } from './constants/wmsConstants';
@@ -60,6 +62,7 @@ import { MovementHistoryModal } from './components/MovementHistoryModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ExecutiveDashboard } from './components/ExecutiveDashboard';
 import { RelocateModal } from './components/RelocateModal';
+import { ExportAddressesModal } from './components/ExportAddressesModal';
 import { ImportHistorySnapshot } from './components/OccupancyEvolutionChart';
 
 type WmsPerspective = 'sku' | 'barra';
@@ -73,6 +76,31 @@ type OccupancyFilter =
   | 'OUTSIDE_LOCAL'
   | 'LOW_STOCK_LT5'
   | 'TRANSBORDO';
+
+interface PhysicalSlotMeta {
+  rua: string;
+  pos: number;
+  nivel: number;
+  wms: string;
+  wmsUpper: string;
+}
+
+const PHYSICAL_SLOTS_BY_STREET: Record<string, PhysicalSlotMeta[]> = (() => {
+  const map: Record<string, PhysicalSlotMeta[]> = {};
+  for (const rua of STREETS) {
+    const list: PhysicalSlotMeta[] = [];
+    const validPositions = getValidPositionsForStreet(rua);
+    for (const pos of validPositions) {
+      const maxLv = getMaxLevelsForStreet(rua, pos);
+      for (let lv = 1; lv <= maxLv; lv++) {
+        const wms = formatWmsAddress(rua, pos, lv);
+        list.push({ rua, pos, nivel: lv, wms, wmsUpper: wms.toUpperCase() });
+      }
+    }
+    map[rua] = list;
+  }
+  return map;
+})();
 
 export default function App() {
   // Core WMS Data State
@@ -171,6 +199,7 @@ export default function App() {
   const [showAuditModal, setShowAuditModal] = useState<boolean>(false);
   const [showAutoSaveModal, setShowAutoSaveModal] = useState<boolean>(false);
   const [showMovementHistoryModal, setShowMovementHistoryModal] = useState<boolean>(false);
+  const [showExportAddressesModal, setShowExportAddressesModal] = useState<boolean>(false);
   const [showExecutiveDashboard, setShowExecutiveDashboard] = useState<boolean>(() => {
     try {
       const saved = localStorage.getItem('estoque_show_executive_dashboard');
@@ -226,14 +255,19 @@ export default function App() {
   const [skuFormSeq, setSkuFormSeq] = useState<string>('0127');
   const [skuFormColor, setSkuFormColor] = useState<string>('102');
   const [skuFormSize, setSkuFormSize] = useState<string>('M');
-  const [skuFormCode, setSkuFormCode] = useState<string>('11060127 - 102 - M');
+  const [skuFormCode, setSkuFormCode] = useState<string>('');
   const [skuFormDeposito, setSkuFormDeposito] = useState<string>('2');
   const [skuFormName, setSkuFormName] = useState<string>('');
+  const [skuFormNameManuallyEdited, setSkuFormNameManuallyEdited] = useState<boolean>(false);
   const [skuFormRua, setSkuFormRua] = useState<string>('RG');
   const [skuFormPos, setSkuFormPos] = useState<number>(1);
   const [skuFormSelectedLevels, setSkuFormSelectedLevels] = useState<number[]>([1]);
   const [skuFormQty, setSkuFormQty] = useState<number>(50);
   const [skuFormColecao, setSkuFormColecao] = useState<string>('35');
+
+  // Deferred Search Queries & Progressive Pagination for Fluid Performance
+  const deferredSearchQuery = useDeferredValue(searchQuery);
+  const [visibleSlotsLimit, setVisibleSlotsLimit] = useState<number>(180);
 
   // Relocate Modal State
   const [relocateSearchInput, setRelocateSearchInput] = useState<string>('');
@@ -278,9 +312,22 @@ export default function App() {
   const [generatedHtmlCode, setGeneratedHtmlCode] = useState<string>('');
   const [isGeneratingHtml, setIsGeneratingHtml] = useState<boolean>(false);
 
-  // Drag and Drop State
+  // Spotlight deferred query
+  const deferredSpotlightQuery = useDeferredValue(spotlightQuery);
+
+  // Drag and Drop State (Unified Desktop HTML5 + Mobile/Tablet Pointer Touch)
   const [dragPayload, setDragPayload] = useState<{ skuId: string; fromWms: string; mode: 'group' | 'single' } | null>(null);
   const [dragOverKey, setDragOverKey] = useState<string | null>(null);
+  const [pointerDragGhost, setPointerDragGhost] = useState<{
+    x: number;
+    y: number;
+    skuCode: string;
+    fromWms: string;
+  } | null>(null);
+  const mapScrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const dragOverKeyRef = useRef<string | null>(null);
+  const suppressNextClickRef = useRef<number>(0);
+  const pointerCleanupRef = useRef<(() => void) | null>(null);
 
   // Toast State
   const [toast, setToast] = useState<{ title: string; subtitle: string; icon: string; visible: boolean }>({
@@ -776,7 +823,7 @@ export default function App() {
     };
   }, [addressMap, skus]);
 
-  // Street statistics for Macro Strip & KPIs
+  // Street statistics for Macro Strip & KPIs (using precomputed static slot index)
   const streetStats = useMemo(() => {
     const stats: Record<
       string,
@@ -786,21 +833,18 @@ export default function App() {
     let grandOccupiedSlots = 0;
 
     for (const rua of STREETS) {
-      const total = getTotalSlotsForStreet(rua);
+      const slotList = PHYSICAL_SLOTS_BY_STREET[rua] || [];
+      const total = slotList.length;
       let occupied = 0;
       let conflicts = 0;
       let transbordo = 0;
 
-      const positions = getValidPositionsForStreet(rua);
-      for (const pos of positions) {
-        const maxLv = getMaxLevelsForStreet(rua, pos);
-        for (let lv = 1; lv <= maxLv; lv++) {
-          const wms = formatWmsAddress(rua, pos, lv);
-          const items = addressMap.get(wms) || [];
-          if (items.length > 0) occupied++;
-          if (conflictAnalysis.allConflictSlots.has(wms)) conflicts++;
-          if (transbordoRegistry[wms]) transbordo++;
-        }
+      for (let i = 0; i < total; i++) {
+        const wms = slotList[i].wms;
+        const items = addressMap.get(wms);
+        if (items && items.length > 0) occupied++;
+        if (conflictAnalysis.allConflictSlots.has(wms)) conflicts++;
+        if (transbordoRegistry[wms]) transbordo++;
       }
 
       const free = Math.max(0, total - occupied);
@@ -1055,13 +1099,58 @@ export default function App() {
     );
   }, [conflictAnalysis.allConflictSlots, selectedAddressKey, soundEnabled, showToast, addressMap]);
 
-  // Filtered positions & slots for the current street/search/filters
+  // Pre-indexed normalized search blobs for instantaneous filtering & Spotlight ranking
+  const skuSearchIndex = useMemo(() => {
+    const idx = new Map<
+      string,
+      { blob: string; codeUpper: string; compactCode: string; wmsUpper: string; baseUpper: string }
+    >();
+    const addEntry = (it: SkuItem) => {
+      if (idx.has(it.id)) return;
+      const codeUpper = normalizeSearchText(it.code);
+      const compactCode = codeUpper.replace(/[^A-Z0-9]/g, '');
+      const wmsUpper = normalizeSearchText(it.wms);
+      const baseUpper = normalizeSearchText(it.codigoBase);
+      const blob = [
+        codeUpper,
+        compactCode,
+        baseUpper,
+        wmsUpper,
+        normalizeSearchText(it.rawLocal),
+        normalizeSearchText(it.name),
+        normalizeSearchText(it.rua),
+        normalizeSearchText(it.groupName),
+        normalizeSearchText(it.colorName),
+        normalizeSearchText(it.colorCode),
+        normalizeSearchText(it.size),
+        normalizeSearchText(it.colecao),
+        normalizeSearchText(it.localCadastroRaw)
+      ]
+        .filter(Boolean)
+        .join(' ');
+      idx.set(it.id, { blob, codeUpper, compactCode, wmsUpper, baseUpper });
+    };
+    for (let i = 0; i < skus.length; i++) addEntry(skus[i]);
+    for (let i = 0; i < barraItems.length; i++) addEntry(barraItems[i]);
+    return idx;
+  }, [skus, barraItems]);
+
+  // Reset progressive card limit whenever active filters or search change
+  useEffect(() => {
+    setVisibleSlotsLimit(180);
+  }, [selectedStreet, selectedRangeId, deferredSearchQuery, occupancyFilter, collectionFilter, selectedLevel, mapMode]);
+
+  // Filtered positions & slots for the current street/search/filters (fast pre-indexed pass)
   const filteredViewData = useMemo(() => {
-    const q = searchQuery.trim().toUpperCase();
-    const isGlobalSearch = q.length >= 2;
+    const normQ = normalizeSearchText(deferredSearchQuery);
+    const isGlobalSearch = normQ.length >= 2;
+    const tokens = isGlobalSearch ? normQ.split(/\s+/).filter(Boolean) : [];
+    const compactQ = isGlobalSearch ? normQ.replace(/[^A-Z0-9]/g, '') : '';
 
     const rangeObj = ADDRESS_RANGES.find(r => r.id === selectedRangeId) || ADDRESS_RANGES[0];
     const targetStreets = isGlobalSearch ? STREETS : [selectedStreet];
+    const checkRange = !isGlobalSearch && selectedRangeId !== 'ALL' && selectedRangeId !== 'ALL-OCCUPIED';
+    const onlyOccupiedInRange = !isGlobalSearch && selectedRangeId === 'ALL-OCCUPIED';
 
     const slots: {
       rua: string;
@@ -1080,69 +1169,70 @@ export default function App() {
       if (collectionFilter === 'ACESSORIOS' && !isAccessoriesStreet(rua)) continue;
       if (collectionFilter === 'PULMAO' && !isPulmaoStreet(rua)) continue;
 
-      const validPositions = getValidPositionsForStreet(rua);
-      for (const pos of validPositions) {
-        if (!isGlobalSearch && selectedRangeId !== 'ALL' && selectedRangeId !== 'ALL-OCCUPIED') {
-          if (pos < rangeObj.start || pos > rangeObj.end) continue;
+      const streetSlots = PHYSICAL_SLOTS_BY_STREET[rua] || [];
+      for (let i = 0; i < streetSlots.length; i++) {
+        const meta = streetSlots[i];
+        if (checkRange && (meta.pos < rangeObj.start || meta.pos > rangeObj.end)) continue;
+        if (selectedLevel !== 'ALL' && String(meta.nivel) !== selectedLevel) continue;
+
+        const wms = meta.wms;
+        const items = addressMap.get(wms) || [];
+        const isOccupied = items.length > 0;
+
+        if (onlyOccupiedInRange && !isOccupied) continue;
+
+        const isConflict = conflictAnalysis.allConflictSlots.has(wms);
+        const isInvader = conflictAnalysis.invaderSlots.has(wms);
+        const isLowStock = conflictAnalysis.lowStockSlots.has(wms);
+        const isTransbordo = Boolean(transbordoRegistry[wms]);
+
+        if (occupancyFilter === 'OCCUPIED' && !isOccupied) continue;
+        if (occupancyFilter === 'FREE' && isOccupied) continue;
+        if (occupancyFilter === 'OVERLAPPED' && !isConflict) continue;
+        if (occupancyFilter === 'OUTSIDE_LOCAL' && !isInvader) continue;
+        if (occupancyFilter === 'LOW_STOCK_LT5' && !isLowStock) continue;
+        if (occupancyFilter === 'TRANSBORDO' && !isTransbordo) continue;
+
+        if (collectionFilter === '51') {
+          if (!items.some(it => it.colecao === '51')) continue;
         }
 
-        const maxLv = getMaxLevelsForStreet(rua, pos);
-        for (let lv = 1; lv <= maxLv; lv++) {
-          if (selectedLevel !== 'ALL' && String(lv) !== selectedLevel) continue;
-
-          const wms = formatWmsAddress(rua, pos, lv);
-          const items = addressMap.get(wms) || [];
-          const isOccupied = items.length > 0;
-
-          if (!isGlobalSearch && selectedRangeId === 'ALL-OCCUPIED' && !isOccupied) continue;
-
-          const isConflict = conflictAnalysis.allConflictSlots.has(wms);
-          const isInvader = conflictAnalysis.invaderSlots.has(wms);
-          const isLowStock = conflictAnalysis.lowStockSlots.has(wms);
-          const isTransbordo = Boolean(transbordoRegistry[wms]);
-
-          if (occupancyFilter === 'OCCUPIED' && !isOccupied) continue;
-          if (occupancyFilter === 'FREE' && isOccupied) continue;
-          if (occupancyFilter === 'OVERLAPPED' && !isConflict) continue;
-          if (occupancyFilter === 'OUTSIDE_LOCAL' && !isInvader) continue;
-          if (occupancyFilter === 'LOW_STOCK_LT5' && !isLowStock) continue;
-          if (occupancyFilter === 'TRANSBORDO' && !isTransbordo) continue;
-
-          if (collectionFilter === '51') {
-            if (!items.some(it => it.colecao === '51')) continue;
+        if (isGlobalSearch) {
+          const matchWms = meta.wmsUpper.includes(normQ);
+          let matchItem = false;
+          if (!matchWms && items.length > 0) {
+            for (let j = 0; j < items.length; j++) {
+              const entry = skuSearchIndex.get(items[j].id);
+              if (!entry) continue;
+              if (
+                (compactQ.length >= 4 && entry.compactCode.includes(compactQ)) ||
+                tokens.every(tk => entry.blob.includes(tk))
+              ) {
+                matchItem = true;
+                break;
+              }
+            }
           }
-
-          if (isGlobalSearch) {
-            const matchWms = wms.toUpperCase().includes(q);
-            const matchItem = items.some(
-              it =>
-                it.code.toUpperCase().includes(q) ||
-                it.name.toUpperCase().includes(q) ||
-                it.colorName.toUpperCase().includes(q) ||
-                it.groupName.toUpperCase().includes(q) ||
-                (it.localCadastroRaw && it.localCadastroRaw.toUpperCase().includes(q))
-            );
-            if (!matchWms && !matchItem) continue;
-          }
-
-          slots.push({
-            rua,
-            pos,
-            nivel: lv,
-            wms,
-            items,
-            isConflict,
-            isInvader,
-            isLowStock,
-            isTransbordo
-          });
+          if (!matchWms && !matchItem) continue;
         }
+
+        slots.push({
+          rua: meta.rua,
+          pos: meta.pos,
+          nivel: meta.nivel,
+          wms,
+          items,
+          isConflict,
+          isInvader,
+          isLowStock,
+          isTransbordo
+        });
       }
     }
 
     return { slots, isGlobalSearch, rangeObj };
   }, [
-    searchQuery,
+    deferredSearchQuery,
     selectedRangeId,
     selectedStreet,
     selectedLevel,
@@ -1150,7 +1240,8 @@ export default function App() {
     collectionFilter,
     addressMap,
     conflictAnalysis,
-    transbordoRegistry
+    transbordoRegistry,
+    skuSearchIndex
   ]);
 
   // Currently inspected slot details
@@ -1649,218 +1740,421 @@ export default function App() {
     );
   };
 
+  // Drag & Drop helpers (Flicker-free state, edge auto-scroll, Desktop HTML5 + Mobile Pointer)
+  const setDragOverSafe = useCallback((nextKey: string | null) => {
+    if (dragOverKeyRef.current !== nextKey) {
+      dragOverKeyRef.current = nextKey;
+      setDragOverKey(nextKey);
+    }
+  }, []);
+
+  const handleHtmlDragLeave = useCallback((e: React.DragEvent, targetKey: string) => {
+    const related = e.relatedTarget as Node | null;
+    if (related && e.currentTarget.contains(related)) return;
+    if (dragOverKeyRef.current === targetKey) {
+      dragOverKeyRef.current = null;
+      setDragOverKey(null);
+    }
+  }, []);
+
+  const autoScrollMapContainer = useCallback((clientY: number) => {
+    const el = mapScrollContainerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const edge = 68;
+    if (clientY >= rect.top && clientY < rect.top + edge) {
+      const intensity = Math.ceil(((rect.top + edge - clientY) / edge) * 18);
+      el.scrollTop = Math.max(0, el.scrollTop - intensity);
+    } else if (clientY <= rect.bottom && clientY > rect.bottom - edge) {
+      const intensity = Math.ceil(((clientY - (rect.bottom - edge)) / edge) * 18);
+      el.scrollTop = el.scrollTop + intensity;
+    }
+  }, []);
+
+  const clearAllDragState = useCallback(() => {
+    if (pointerCleanupRef.current) {
+      pointerCleanupRef.current();
+      pointerCleanupRef.current = null;
+    }
+    dragOverKeyRef.current = null;
+    setDragPayload(null);
+    setDragOverKey(null);
+    setPointerDragGhost(null);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (pointerCleanupRef.current) pointerCleanupRef.current();
+    };
+  }, []);
+
   // Drag & Drop handlers
-  const handleDropOnStreet = (targetRua: string) => {
-    if (!dragPayload) return;
-    const sku = skus.find(s => s.id === dragPayload.skuId);
-    setDragPayload(null);
-    setDragOverKey(null);
-    if (!sku) return;
+  const handleDropOnStreet = useCallback(
+    (
+      targetRua: string,
+      overridePayload?: { skuId: string; fromWms: string; mode: 'group' | 'single' } | null
+    ) => {
+      const activePayload = overridePayload || dragPayload;
+      if (!activePayload) return;
+      const sku = skus.find(s => s.id === activePayload.skuId);
+      dragOverKeyRef.current = null;
+      setDragPayload(null);
+      setDragOverKey(null);
+      setPointerDragGhost(null);
+      if (!sku) return;
 
-    const multiInfo = getSkuMultiLevelInfo(sku);
-    const excludeIds = new Set(multiInfo.siblingItems.map(s => s.id));
-    const needLevels = Math.min(
-      getMaxLevelsForStreet(targetRua),
-      Math.max(1, multiInfo.siblingItems.length)
-    );
-    const suggestion = findMultiLevelFreeColumnInStreet(targetRua, needLevels, 1, excludeIds);
-    if (!suggestion) {
-      playMacSound('alert', soundEnabled);
-      showToast(
-        'Rua Sem Espaço Agrupado',
-        `Não há coluna na Rua ${targetRua} com ${needLevels} nível(is) livre(s).`,
-        '⚠️'
-      );
-      return;
-    }
-
-    const oldRaw = sku.rawLocal || sku.wms;
-    const newRawLocal = suggestion.formattedLocal;
-    const siblingIdSet = new Set(multiInfo.siblingItems.map(s => s.id));
-
-    const nextSkus = skus.map(item => {
-      if (!siblingIdSet.has(item.id)) return item;
-      const idx = multiInfo.siblingItems.findIndex(s => s.id === item.id);
-      const lv = suggestion.levels[idx] || suggestion.levels[0];
-      return {
-        ...item,
-        lastRelocatedFrom: item.wms,
-        rua: suggestion.rua,
-        pos: suggestion.pos,
-        nivel: lv,
-        wms: formatWmsAddress(suggestion.rua, suggestion.pos, lv),
-        rawLocal: newRawLocal,
-        colecao: isReservedCol35Street(suggestion.rua) ? '35' : item.colecao
-      };
-    });
-
-    const { nextMoved } = recordSkuMoved(sku, oldRaw, newRawLocal, 'drag', movedSkusRegistry);
-    setSkus(nextSkus);
-    setMovedSkusRegistry(nextMoved);
-    selectStreet(suggestion.rua);
-    setSelectedAddressKey(suggestion.wms);
-    setSelectedSkuId(sku.id);
-    persistCurrentState(nextSkus, nextMoved, transbordoRegistry);
-    playMacSound('success', soundEnabled);
-    showToast(
-      `Arrastado p/ Rua ${suggestion.rua}`,
-      `${sku.code} alocado em ${newRawLocal}`,
-      '✋'
-    );
-  };
-
-  const handleDropOnSlot = (destWms: string) => {
-    if (!dragPayload) return;
-    const payload = dragPayload;
-    setDragPayload(null);
-    setDragOverKey(null);
-
-    const sku = skus.find(s => s.id === payload.skuId);
-    if (!sku) return;
-
-    const parsedDest = parseAddressString(destWms);
-    if (!parsedDest) return;
-
-    if (transbordoRegistry[parsedDest.wms]) {
-      playMacSound('alert', soundEnabled);
-      showToast(
-        `🔒 Colmeia de Transbordo Protegida (${parsedDest.wms})!`,
-        `Esta colmeia é um Mini Pulmão do SKU ${transbordoRegistry[parsedDest.wms].code}.`,
-        '⚡'
-      );
-      return;
-    }
-
-    const multiInfo = getSkuMultiLevelInfo(sku);
-    const isDifferentColOrStreet = parsedDest.rua !== sku.rua || parsedDest.pos !== sku.pos;
-
-    if ((payload.mode === 'group' || isDifferentColOrStreet) && multiInfo.siblingItems.length > 1) {
-      const maxLvDest = getMaxLevelsForStreet(parsedDest.rua, parsedDest.pos);
-      const need = Math.min(maxLvDest, multiInfo.siblingItems.length);
+      const multiInfo = getSkuMultiLevelInfo(sku);
       const excludeIds = new Set(multiInfo.siblingItems.map(s => s.id));
-      const freeLvls: number[] = [];
-
-      for (let lv = 1; lv <= maxLvDest; lv++) {
-        const k = formatWmsAddress(parsedDest.rua, parsedDest.pos, lv);
-        const occ = (addressMap.get(k) || []).filter(it => !excludeIds.has(it.id));
-        if (occ.length === 0 && !transbordoRegistry[k]) freeLvls.push(lv);
+      const needLevels = Math.min(
+        getMaxLevelsForStreet(targetRua),
+        Math.max(1, multiInfo.siblingItems.length)
+      );
+      const suggestion = findMultiLevelFreeColumnInStreet(targetRua, needLevels, 1, excludeIds);
+      if (!suggestion) {
+        playMacSound('alert', soundEnabled);
+        showToast(
+          'Rua Sem Espaço Agrupado',
+          `Não há coluna na Rua ${targetRua} com ${needLevels} nível(is) livre(s).`,
+          '⚠️'
+        );
+        return;
       }
 
-      let chosenLevels =
-        freeLvls.length >= need
-          ? pickBestLevelsInColumn(freeLvls, need)
-          : Array.from({ length: need }, (_, idx) => Math.min(maxLvDest, idx + 1));
-
-      if (freeLvls.includes(parsedDest.nivel) && !chosenLevels.includes(parsedDest.nivel)) {
-        const others = freeLvls.filter(l => l !== parsedDest.nivel).slice(0, need - 1);
-        chosenLevels = [parsedDest.nivel, ...others].sort((a, b) => a - b);
-      }
-
-      const newRawLocal = formatLevelsToSisplanLocal(parsedDest.rua, parsedDest.pos, chosenLevels);
       const oldRaw = sku.rawLocal || sku.wms;
+      const newRawLocal = suggestion.formattedLocal;
+      const siblingIdSet = new Set(multiInfo.siblingItems.map(s => s.id));
 
       const nextSkus = skus.map(item => {
-        if (!excludeIds.has(item.id)) return item;
+        if (!siblingIdSet.has(item.id)) return item;
         const idx = multiInfo.siblingItems.findIndex(s => s.id === item.id);
-        const lv = chosenLevels[idx] || chosenLevels[0];
+        const lv = suggestion.levels[idx] || suggestion.levels[0];
+        return {
+          ...item,
+          lastRelocatedFrom: item.wms,
+          rua: suggestion.rua,
+          pos: suggestion.pos,
+          nivel: lv,
+          wms: formatWmsAddress(suggestion.rua, suggestion.pos, lv),
+          rawLocal: newRawLocal,
+          colecao: isReservedCol35Street(suggestion.rua) ? '35' : item.colecao
+        };
+      });
+
+      const { nextMoved } = recordSkuMoved(sku, oldRaw, newRawLocal, 'drag', movedSkusRegistry);
+      setSkus(nextSkus);
+      setMovedSkusRegistry(nextMoved);
+      selectStreet(suggestion.rua);
+      setSelectedAddressKey(suggestion.wms);
+      setSelectedSkuId(sku.id);
+      persistCurrentState(nextSkus, nextMoved, transbordoRegistry);
+      playMacSound('success', soundEnabled);
+      showToast(
+        `Arrastado p/ Rua ${suggestion.rua}`,
+        `${sku.code} alocado em ${newRawLocal}`,
+        '✋'
+      );
+    },
+    [
+      dragPayload,
+      skus,
+      getSkuMultiLevelInfo,
+      findMultiLevelFreeColumnInStreet,
+      soundEnabled,
+      showToast,
+      recordSkuMoved,
+      movedSkusRegistry,
+      selectStreet,
+      persistCurrentState,
+      transbordoRegistry
+    ]
+  );
+
+  const handleDropOnSlot = useCallback(
+    (
+      destWms: string,
+      overridePayload?: { skuId: string; fromWms: string; mode: 'group' | 'single' } | null
+    ) => {
+      const payload = overridePayload || dragPayload;
+      if (!payload) return;
+      dragOverKeyRef.current = null;
+      setDragPayload(null);
+      setDragOverKey(null);
+      setPointerDragGhost(null);
+
+      const sku = skus.find(s => s.id === payload.skuId);
+      if (!sku) return;
+
+      const parsedDest = parseAddressString(destWms);
+      if (!parsedDest) return;
+
+      if (transbordoRegistry[parsedDest.wms]) {
+        playMacSound('alert', soundEnabled);
+        showToast(
+          `🔒 Colmeia de Transbordo Protegida (${parsedDest.wms})!`,
+          `Esta colmeia é um Mini Pulmão do SKU ${transbordoRegistry[parsedDest.wms].code}.`,
+          '⚡'
+        );
+        return;
+      }
+
+      const multiInfo = getSkuMultiLevelInfo(sku);
+      const isDifferentColOrStreet = parsedDest.rua !== sku.rua || parsedDest.pos !== sku.pos;
+
+      if ((payload.mode === 'group' || isDifferentColOrStreet) && multiInfo.siblingItems.length > 1) {
+        const maxLvDest = getMaxLevelsForStreet(parsedDest.rua, parsedDest.pos);
+        const need = Math.min(maxLvDest, multiInfo.siblingItems.length);
+        const excludeIds = new Set(multiInfo.siblingItems.map(s => s.id));
+        const freeLvls: number[] = [];
+
+        for (let lv = 1; lv <= maxLvDest; lv++) {
+          const k = formatWmsAddress(parsedDest.rua, parsedDest.pos, lv);
+          const occ = (addressMap.get(k) || []).filter(it => !excludeIds.has(it.id));
+          if (occ.length === 0 && !transbordoRegistry[k]) freeLvls.push(lv);
+        }
+
+        let chosenLevels =
+          freeLvls.length >= need
+            ? pickBestLevelsInColumn(freeLvls, need)
+            : Array.from({ length: need }, (_, idx) => Math.min(maxLvDest, idx + 1));
+
+        if (freeLvls.includes(parsedDest.nivel) && !chosenLevels.includes(parsedDest.nivel)) {
+          const others = freeLvls.filter(l => l !== parsedDest.nivel).slice(0, need - 1);
+          chosenLevels = [parsedDest.nivel, ...others].sort((a, b) => a - b);
+        }
+
+        const newRawLocal = formatLevelsToSisplanLocal(parsedDest.rua, parsedDest.pos, chosenLevels);
+        const oldRaw = sku.rawLocal || sku.wms;
+
+        const nextSkus = skus.map(item => {
+          if (!excludeIds.has(item.id)) return item;
+          const idx = multiInfo.siblingItems.findIndex(s => s.id === item.id);
+          const lv = chosenLevels[idx] || chosenLevels[0];
+          return {
+            ...item,
+            lastRelocatedFrom: item.wms,
+            rua: parsedDest.rua,
+            pos: parsedDest.pos,
+            nivel: lv,
+            wms: formatWmsAddress(parsedDest.rua, parsedDest.pos, lv),
+            rawLocal: newRawLocal,
+            colecao: isReservedCol35Street(parsedDest.rua) ? '35' : item.colecao
+          };
+        });
+
+        const { nextMoved, staysMoved } = recordSkuMoved(
+          sku,
+          oldRaw,
+          newRawLocal,
+          'drag',
+          movedSkusRegistry
+        );
+        setSkus(nextSkus);
+        setMovedSkusRegistry(nextMoved);
+        setSelectedStreet(parsedDest.rua);
+        setSelectedAddressKey(formatWmsAddress(parsedDest.rua, parsedDest.pos, chosenLevels[0]));
+        setSelectedSkuId(sku.id);
+        persistCurrentState(nextSkus, nextMoved, transbordoRegistry);
+        playMacSound(staysMoved ? 'success' : 'pop', soundEnabled);
+        showToast(
+          staysMoved
+            ? `SKU ${sku.code} Movido (${need} Níveis)`
+            : `SKU Retornou ao Local Original`,
+          `${oldRaw} → ${newRawLocal}`,
+          staysMoved ? '✋' : '↩️'
+        );
+        return;
+      }
+
+      // Single level move
+      if (parsedDest.wms === sku.wms) return;
+      const oldRaw = sku.rawLocal || sku.wms;
+      const skuKey = getCanonicalSkuKey(sku.code);
+
+      const updatedSkus = skus.map(item => {
+        if (item.id !== sku.id) return item;
         return {
           ...item,
           lastRelocatedFrom: item.wms,
           rua: parsedDest.rua,
           pos: parsedDest.pos,
-          nivel: lv,
-          wms: formatWmsAddress(parsedDest.rua, parsedDest.pos, lv),
-          rawLocal: newRawLocal,
-          colecao: isReservedCol35Street(parsedDest.rua) ? '35' : item.colecao
+          nivel: parsedDest.nivel,
+          wms: parsedDest.wms
         };
+      });
+
+      const sameColLevels = updatedSkus
+        .filter(
+          s =>
+            getCanonicalSkuKey(s.code) === skuKey &&
+            s.rua === parsedDest.rua &&
+            s.pos === parsedDest.pos
+        )
+        .map(s => s.nivel);
+      const updatedRawLocal = formatLevelsToSisplanLocal(
+        parsedDest.rua,
+        parsedDest.pos,
+        sameColLevels
+      );
+
+      const finalSkus = updatedSkus.map(item => {
+        if (
+          getCanonicalSkuKey(item.code) === skuKey &&
+          item.rua === parsedDest.rua &&
+          item.pos === parsedDest.pos
+        ) {
+          return { ...item, rawLocal: updatedRawLocal };
+        }
+        return item;
       });
 
       const { nextMoved, staysMoved } = recordSkuMoved(
         sku,
         oldRaw,
-        newRawLocal,
+        updatedRawLocal,
         'drag',
         movedSkusRegistry
       );
-      setSkus(nextSkus);
+      setSkus(finalSkus);
       setMovedSkusRegistry(nextMoved);
       setSelectedStreet(parsedDest.rua);
-      setSelectedAddressKey(formatWmsAddress(parsedDest.rua, parsedDest.pos, chosenLevels[0]));
+      setSelectedAddressKey(parsedDest.wms);
       setSelectedSkuId(sku.id);
-      persistCurrentState(nextSkus, nextMoved, transbordoRegistry);
+      persistCurrentState(finalSkus, nextMoved, transbordoRegistry);
       playMacSound(staysMoved ? 'success' : 'pop', soundEnabled);
       showToast(
-        staysMoved
-          ? `SKU ${sku.code} Movido (${need} Níveis)`
-          : `SKU Retornou ao Local Original`,
-        `${oldRaw} → ${newRawLocal}`,
+        staysMoved ? 'SKU Movido via Drag & Drop' : 'SKU Retornou ao Local Original',
+        `${sku.code}: ${oldRaw} → ${updatedRawLocal}`,
         staysMoved ? '✋' : '↩️'
       );
-      return;
-    }
+    },
+    [
+      dragPayload,
+      skus,
+      transbordoRegistry,
+      soundEnabled,
+      showToast,
+      getSkuMultiLevelInfo,
+      addressMap,
+      recordSkuMoved,
+      movedSkusRegistry,
+      persistCurrentState
+    ]
+  );
 
-    // Single level move
-    if (parsedDest.wms === sku.wms) return;
-    const oldRaw = sku.rawLocal || sku.wms;
-    const skuKey = getCanonicalSkuKey(sku.code);
+  // Unified Touch / Pen Pointer Drag-and-Drop (supports explicit ⠿ grip handle OR 260ms long-press)
+  const startPointerDrag = useCallback(
+    (e: React.PointerEvent, sku: SkuItem, fromWms: string, immediate: boolean) => {
+      if (e.pointerType === 'mouse' && !immediate) return; // Desktop card drag uses native HTML5 DnD cleanly
+      if (e.button !== 0 && e.pointerType === 'mouse') return;
 
-    const updatedSkus = skus.map(item => {
-      if (item.id !== sku.id) return item;
-      return {
-        ...item,
-        lastRelocatedFrom: item.wms,
-        rua: parsedDest.rua,
-        pos: parsedDest.pos,
-        nivel: parsedDest.nivel,
-        wms: parsedDest.wms
-      };
-    });
-
-    const sameColLevels = updatedSkus
-      .filter(
-        s =>
-          getCanonicalSkuKey(s.code) === skuKey &&
-          s.rua === parsedDest.rua &&
-          s.pos === parsedDest.pos
-      )
-      .map(s => s.nivel);
-    const updatedRawLocal = formatLevelsToSisplanLocal(
-      parsedDest.rua,
-      parsedDest.pos,
-      sameColLevels
-    );
-
-    const finalSkus = updatedSkus.map(item => {
-      if (
-        getCanonicalSkuKey(item.code) === skuKey &&
-        item.rua === parsedDest.rua &&
-        item.pos === parsedDest.pos
-      ) {
-        return { ...item, rawLocal: updatedRawLocal };
+      if (pointerCleanupRef.current) {
+        pointerCleanupRef.current();
+        pointerCleanupRef.current = null;
       }
-      return item;
-    });
 
-    const { nextMoved, staysMoved } = recordSkuMoved(
-      sku,
-      oldRaw,
-      updatedRawLocal,
-      'drag',
-      movedSkusRegistry
-    );
-    setSkus(finalSkus);
-    setMovedSkusRegistry(nextMoved);
-    setSelectedStreet(parsedDest.rua);
-    setSelectedAddressKey(parsedDest.wms);
-    setSelectedSkuId(sku.id);
-    persistCurrentState(finalSkus, nextMoved, transbordoRegistry);
-    playMacSound(staysMoved ? 'success' : 'pop', soundEnabled);
-    showToast(
-      staysMoved ? 'SKU Movido via Drag & Drop' : 'SKU Retornou ao Local Original',
-      `${sku.code}: ${oldRaw} → ${updatedRawLocal}`,
-      staysMoved ? '✋' : '↩️'
-    );
-  };
+      const startX = e.clientX;
+      const startY = e.clientY;
+      let dragging = false;
+      let holdTimer: ReturnType<typeof setTimeout> | null = null;
+      const payload = { skuId: sku.id, fromWms, mode: 'group' as const };
+
+      const activateDrag = (x: number, y: number) => {
+        dragging = true;
+        setDragPayload(payload);
+        setPointerDragGhost({ x, y, skuCode: sku.code, fromWms });
+        if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+          try {
+            navigator.vibrate(15);
+          } catch {}
+        }
+      };
+
+      const findDropTargetAtPoint = (x: number, y: number): { type: 'slot' | 'street'; key: string } | null => {
+        const els = document.elementsFromPoint(x, y);
+        for (const el of els) {
+          const dropWms = el.getAttribute('data-drop-wms');
+          if (dropWms) return { type: 'slot', key: dropWms };
+          const dropStreet = el.getAttribute('data-drop-street');
+          if (dropStreet) return { type: 'street', key: dropStreet };
+        }
+        return null;
+      };
+
+      const onMove = (ev: PointerEvent) => {
+        if (!dragging) {
+          const dist = Math.hypot(ev.clientX - startX, ev.clientY - startY);
+          if (dist > 8) {
+            if (immediate) {
+              activateDrag(ev.clientX, ev.clientY);
+            } else {
+              // User is scrolling vertically/horizontally on touch -> cancel hold timer gracefully
+              cleanup();
+              return;
+            }
+          } else {
+            return;
+          }
+        }
+        ev.preventDefault();
+        setPointerDragGhost({ x: ev.clientX, y: ev.clientY, skuCode: sku.code, fromWms });
+        autoScrollMapContainer(ev.clientY);
+        const target = findDropTargetAtPoint(ev.clientX, ev.clientY);
+        if (target) {
+          setDragOverSafe(target.type === 'street' ? `STREET:${target.key}` : target.key);
+        } else {
+          setDragOverSafe(null);
+        }
+      };
+
+      const onEnd = (ev: PointerEvent) => {
+        if (dragging) {
+          ev.preventDefault();
+          suppressNextClickRef.current = Date.now() + 280;
+          const target = findDropTargetAtPoint(ev.clientX, ev.clientY);
+          cleanup();
+          if (target) {
+            if (target.type === 'street') {
+              handleDropOnStreet(target.key, payload);
+            } else {
+              handleDropOnSlot(target.key, payload);
+            }
+          } else {
+            setDragPayload(null);
+            setDragOverSafe(null);
+            setPointerDragGhost(null);
+          }
+        } else {
+          cleanup();
+        }
+      };
+
+      const cleanup = () => {
+        if (holdTimer) {
+          clearTimeout(holdTimer);
+          holdTimer = null;
+        }
+        window.removeEventListener('pointermove', onMove, { capture: true });
+        window.removeEventListener('pointerup', onEnd, { capture: true });
+        window.removeEventListener('pointercancel', onEnd, { capture: true });
+        pointerCleanupRef.current = null;
+      };
+
+      pointerCleanupRef.current = cleanup;
+      window.addEventListener('pointermove', onMove, { passive: false, capture: true });
+      window.addEventListener('pointerup', onEnd, { capture: true });
+      window.addEventListener('pointercancel', onEnd, { capture: true });
+
+      if (immediate) {
+        e.stopPropagation();
+        activateDrag(startX, startY);
+      } else {
+        holdTimer = setTimeout(() => {
+          activateDrag(startX, startY);
+        }, 260);
+      }
+    },
+    [autoScrollMapContainer, setDragOverSafe, handleDropOnStreet, handleDropOnSlot]
+  );
 
   // ============================================================================
   // CSV EXPORT HANDLERS
@@ -1966,11 +2260,39 @@ export default function App() {
     );
   };
 
-  const exportAllMapAddressesCsv = useCallback(() => {
-    const lines = ['ENDERECO'];
+  // Exporta TODOS os endereços da rua indicada (inclusive vazios, 1 por linha sem SKUs: RA.001.1, RA.001.2...)
+  const exportCurrentStreetAddressesCsv = useCallback((targetStreet: string = selectedStreet, withHeader: boolean = false) => {
+    const lines: string[] = [];
+    if (withHeader) lines.push('ENDERECO');
+
+    const validPositions = getValidPositionsForStreet(targetStreet);
+    let count = 0;
+    for (const pos of validPositions) {
+      const maxLv = getMaxLevelsForStreet(targetStreet, pos);
+      for (let lv = 1; lv <= maxLv; lv++) {
+        lines.push(formatWmsAddress(targetStreet, pos, lv));
+        count++;
+      }
+    }
+
+    const csvContent = lines.join('\n') + '\n';
+    const dateStr = new Date().toISOString().slice(0, 10);
+    triggerCsvDownload(csvContent, `enderecos_rua_${targetStreet}_todos_inclusive_vazios_${dateStr}.csv`);
+    playMacSound('success', soundEnabled);
+    showToast(
+      `Endereços da Rua ${targetStreet} Exportados`,
+      `${count} endereços gerados (100% da rua, inclusive vazios).`,
+      '📍'
+    );
+  }, [selectedStreet, soundEnabled, showToast]);
+
+  // Exporta TODOS os endereços de todas as ruas (inclusive vazios, 1 por linha sem SKUs)
+  const exportAllMapAddressesCsv = useCallback((withHeader: boolean = false, streetsList: readonly string[] = ['RA', 'RB', 'RC', 'RD', 'RE', 'RF', 'RG', 'RH']) => {
+    const lines: string[] = [];
+    if (withHeader) lines.push('ENDERECO');
     let count = 0;
 
-    for (const rua of STREETS) {
+    for (const rua of streetsList) {
       const validPositions = getValidPositionsForStreet(rua);
       for (const pos of validPositions) {
         const maxLv = getMaxLevelsForStreet(rua, pos);
@@ -1983,18 +2305,83 @@ export default function App() {
 
     const csvContent = lines.join('\n') + '\n';
     const dateStr = new Date().toISOString().slice(0, 10);
-    triggerCsvDownload(csvContent, `enderecos_mapa_wms_completo_${dateStr}.csv`);
+    triggerCsvDownload(csvContent, `enderecos_mapa_wms_todos_inclusive_vazios_${dateStr}.csv`);
     playMacSound('success', soundEnabled);
     showToast(
       'Lista de Endereços Exportada',
-      `${count} endereços presentes no mapa exportados com sucesso em CSV.`,
-      '📍'
+      `${count.toLocaleString('pt-BR')} endereços gerados de ${streetsList.length} ruas (inclusive vazios).`,
+      '🌐'
     );
   }, [soundEnabled, showToast]);
 
   // ============================================================================
-  // OPEN SKU MODAL / RELOCATE MODAL HELPERS
+  // OPEN SKU MODAL / AUTO-FILL & RELOCATE MODAL HELPERS
   // ============================================================================
+  const syncSkuFormFromFullCode = (rawInput: string) => {
+    const upper = rawInput.toUpperCase();
+    setSkuFormCode(upper);
+
+    const parsed = parseFullSkuString(upper);
+    const nextBrand = parsed.hasBrand ? parsed.dMarca : skuFormBrand;
+    const nextLabel = parsed.hasLabel ? parsed.dEtiqueta : skuFormLabel;
+    const nextGroup = parsed.hasGroup ? parsed.dGrupo : skuFormGroup;
+    const nextSeq = parsed.hasSeq ? parsed.seqRaw : parsed.baseDigits.length > 0 ? '' : skuFormSeq;
+    const nextColor = parsed.hasColor ? parsed.colorCode : skuFormColor;
+    const nextSize = parsed.hasSize ? parsed.size : skuFormSize;
+
+    if (parsed.hasBrand) setSkuFormBrand(nextBrand);
+    if (parsed.hasLabel) setSkuFormLabel(nextLabel);
+    if (parsed.hasGroup) setSkuFormGroup(nextGroup);
+    if (parsed.hasSeq) setSkuFormSeq(parsed.seqRaw);
+    if (parsed.hasColor) setSkuFormColor(nextColor);
+    if (parsed.hasSize) setSkuFormSize(nextSize);
+
+    if (!skuFormNameManuallyEdited) {
+      if (upper.trim().length >= 2) {
+        const dec = decodeSkuPrefix(upper, nextColor, nextSize);
+        setSkuFormName(dec.autoName);
+      } else {
+        setSkuFormName('');
+      }
+    }
+  };
+
+  const updateSkuFromParts = (
+    overrides: Partial<{
+      brand: string;
+      label: string;
+      group: string;
+      seq: string;
+      color: string;
+      size: string;
+    }>
+  ) => {
+    const b = overrides.brand !== undefined ? overrides.brand : skuFormBrand;
+    const l = overrides.label !== undefined ? overrides.label : skuFormLabel;
+    const g = overrides.group !== undefined ? overrides.group : skuFormGroup;
+    const sqRaw = overrides.seq !== undefined ? overrides.seq : skuFormSeq;
+    const sqPadded = (sqRaw.replace(/\D/g, '') || '0001').padStart(4, '0').slice(0, 4);
+    const c = (overrides.color !== undefined ? overrides.color : skuFormColor)
+      .replace(/\D/g, '')
+      .padStart(3, '0');
+    const sz = (overrides.size !== undefined ? overrides.size : skuFormSize).toUpperCase();
+
+    if (overrides.brand !== undefined) setSkuFormBrand(b);
+    if (overrides.label !== undefined) setSkuFormLabel(l);
+    if (overrides.group !== undefined) setSkuFormGroup(g);
+    if (overrides.seq !== undefined) setSkuFormSeq(sqRaw);
+    if (overrides.color !== undefined) setSkuFormColor(c);
+    if (overrides.size !== undefined) setSkuFormSize(sz);
+
+    const nextFull = `${b}${l}${g}${sqPadded} - ${c} - ${sz || 'U'}`;
+    setSkuFormCode(nextFull);
+
+    if (!skuFormNameManuallyEdited) {
+      const dec = decodeSkuPrefix(nextFull, c, sz || 'U');
+      setSkuFormName(dec.autoName);
+    }
+  };
+
   const openAllocateOrEditSkuModal = (editItem?: SkuItem | null, defaultWms?: string) => {
     if (editItem) {
       const dec = decodeSkuPrefix(editItem.code);
@@ -2008,7 +2395,8 @@ export default function App() {
       setSkuFormSize(dec.size);
       setSkuFormCode(editItem.code);
       setSkuFormDeposito(editItem.deposito || '2');
-      setSkuFormName(editItem.name);
+      setSkuFormName(editItem.name || dec.autoName);
+      setSkuFormNameManuallyEdited(Boolean(editItem.name && editItem.name !== dec.autoName));
       setSkuFormRua(editItem.rua);
       setSkuFormPos(editItem.pos);
       setSkuFormSelectedLevels(multi.levels);
@@ -2022,6 +2410,17 @@ export default function App() {
         wms: formatWmsAddress(selectedStreet, 1, 1)
       };
       setSkuFormEditId('');
+      setSkuFormBrand('1');
+      setSkuFormLabel('1');
+      setSkuFormGroup('06');
+      setSkuFormSeq('0127');
+      setSkuFormColor('102');
+      setSkuFormSize('M');
+      setSkuFormCode('');
+      setSkuFormDeposito('2');
+      setSkuFormName('');
+      setSkuFormNameManuallyEdited(false);
+      setSkuFormQty(50);
       setSkuFormRua(target.rua);
       setSkuFormPos(target.pos);
       setSkuFormSelectedLevels([target.nivel]);
@@ -2097,6 +2496,7 @@ export default function App() {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        clearAllDragState();
         setShowImportModal(false);
         setShowSkuModal(false);
         setShowRelocateModal(false);
@@ -2136,28 +2536,40 @@ export default function App() {
   const movedCount = Object.keys(movedSkusRegistry).length;
   const transbordoCount = Object.keys(transbordoRegistry).length;
 
-  // Memoized Spotlight search items
+  // Memoized Spotlight search items (indexed tokenized search + relevance ranking)
   const filteredSpotlightItems = useMemo(() => {
-    const q = spotlightQuery.trim().toUpperCase();
+    const normQ = normalizeSearchText(deferredSpotlightQuery);
     const sourcePool = wmsPerspective === 'barra' && barraItems.length > 0 ? barraItems : skus;
-    if (!q) {
+    if (!normQ) {
       return sourcePool.slice(0, 30);
     }
-    return sourcePool
-      .filter(s => {
-        return (
-          s.code.toUpperCase().includes(q) ||
-          s.wms.toUpperCase().includes(q) ||
-          s.name.toUpperCase().includes(q) ||
-          (s.rua && s.rua.toUpperCase().includes(q)) ||
-          (s.groupName && s.groupName.toUpperCase().includes(q)) ||
-          (s.colorName && s.colorName.toUpperCase().includes(q)) ||
-          (s.size && s.size.toUpperCase() === q) ||
-          (s.colecao && s.colecao.toUpperCase().includes(q))
-        );
-      })
-      .slice(0, 50);
-  }, [spotlightQuery, skus, barraItems, wmsPerspective]);
+
+    const tokens = normQ.split(/\s+/).filter(Boolean);
+    const compactQ = normQ.replace(/[^A-Z0-9]/g, '');
+    const scored: { item: SkuItem; score: number }[] = [];
+
+    for (let i = 0; i < sourcePool.length; i++) {
+      const s = sourcePool[i];
+      const idx = skuSearchIndex.get(s.id);
+      if (!idx) continue;
+
+      const compactHit = compactQ.length >= 4 && idx.compactCode.includes(compactQ);
+      const tokenHit = compactHit || tokens.every(tk => idx.blob.includes(tk));
+      if (!tokenHit) continue;
+
+      let score = 10;
+      if (idx.wmsUpper === normQ || idx.codeUpper === normQ) score += 1000;
+      else if (idx.baseUpper === normQ || idx.compactCode === compactQ) score += 800;
+      else if (idx.codeUpper.startsWith(normQ) || idx.baseUpper.startsWith(normQ)) score += 500;
+      else if (idx.wmsUpper.startsWith(normQ)) score += 400;
+      else if (idx.codeUpper.includes(normQ) || compactHit) score += 200;
+
+      scored.push({ item: s, score });
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, 50).map(x => x.item);
+  }, [deferredSpotlightQuery, skus, barraItems, wmsPerspective, skuSearchIndex]);
 
   // Audio confirmation when results are updated / viewed in Spotlight
   const prevSpotlightQueryRef = useRef<string>('');
@@ -2358,14 +2770,14 @@ export default function App() {
 
   return (
     <div
-      className="h-screen w-screen overflow-hidden flex flex-col relative select-none bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors duration-200"
+      className="h-dvh w-full overflow-hidden flex flex-col relative select-none bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors duration-200"
     >
       {/* ==================================================================== */}
       {/* TOP MENUBAR                                                          */}
       {/* ==================================================================== */}
       {!isFullscreen && (
-        <header className="mac-menubar h-8 px-4 flex items-center justify-between text-xs font-medium z-40 shrink-0 border-b border-black/10 dark:border-white/10 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md rounded-none">
-          <div className="flex items-center space-x-3 relative">
+        <header className="mac-menubar min-h-8 py-1 px-2 sm:px-4 flex items-center justify-between gap-2 text-xs font-medium z-40 shrink-0 border-b border-black/10 dark:border-white/10 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md rounded-none">
+          <div className="flex items-center space-x-2 sm:space-x-3 relative shrink-0">
             <button
               type="button"
               onClick={e => {
@@ -2673,20 +3085,51 @@ export default function App() {
                   <span>📄 Exportar CSV Detalhado (1 Nível/Linha)</span>
                   <span className="font-mono text-[10px] opacity-70">CSV</span>
                 </button>
+                <div className="border-t border-black/10 dark:border-white/10 my-1" />
                 <button
                   type="button"
                   onClick={() => {
                     setOpenMenu(null);
-                    exportAllMapAddressesCsv();
+                    exportCurrentStreetAddressesCsv(selectedStreet, false);
                   }}
                   className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-emerald-600 hover:text-white transition flex justify-between text-emerald-600 dark:text-emerald-400 font-bold"
-                  title="Exportar lista de todos os endereços presentes no mapa (apenas os endereços: RA.001.1, RA.001.2...)"
+                  title={`Exportar lista de todos os endereços da Rua ${selectedStreet} (100% da rua, inclusive vazios, formato puro RA.001.1)`}
                 >
                   <span className="flex items-center gap-1.5">
                     <span>📍</span>
-                    <span>Exportar Lista de Endereços (.CSV)</span>
+                    <span>Exportar Endereços da Rua {selectedStreet} (.CSV)</span>
                   </span>
-                  <span className="font-mono text-[10px] opacity-80">Apenas Endereços</span>
+                  <span className="font-mono text-[10px] opacity-80">Inclusive Vazios</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpenMenu(null);
+                    exportAllMapAddressesCsv(false);
+                  }}
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-emerald-600 hover:text-white transition flex justify-between text-emerald-600 dark:text-emerald-400 font-semibold"
+                  title="Exportar lista de todos os endereços de todas as ruas RA a RH (inclusive vazios, formato puro)"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>🌐</span>
+                    <span>Exportar Todas as Ruas RA–RH (.CSV)</span>
+                  </span>
+                  <span className="font-mono text-[10px] opacity-80">Todas as Ruas</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpenMenu(null);
+                    setShowExportAddressesModal(true);
+                  }}
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex justify-between text-slate-700 dark:text-slate-200 font-medium"
+                  title="Abrir painel para personalizar opções e pré-visualizar antes de baixar"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>⚙️</span>
+                    <span>Personalizar Lista de Endereços...</span>
+                  </span>
+                  <span className="font-mono text-[10px] opacity-70">Painel</span>
                 </button>
                 <button
                   type="button"
@@ -2914,7 +3357,7 @@ export default function App() {
           </div>
 
           {/* Right Status Icons */}
-          <div className="flex items-center space-x-2">
+          <div className="flex items-center space-x-1.5 sm:space-x-2 overflow-x-auto no-scrollbar max-w-full shrink-0">
             {/* Auto-Save Status Pill Button */}
             <button
               type="button"
@@ -3097,8 +3540,8 @@ export default function App() {
       <main className="flex-1 w-full h-full flex flex-col overflow-hidden min-h-0 relative">
         <div className="w-full h-full flex flex-col overflow-hidden relative bg-white/70 dark:bg-slate-900/70 rounded-none border-none">
           {/* Main Warehouse Toolbar */}
-          <div className="h-11 px-3 sm:px-4 flex items-center justify-between border-b border-black/10 dark:border-white/10 shrink-0 bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-none">
-            <div className="flex items-center space-x-2.5 sm:space-x-3 shrink-0">
+          <div className="min-h-11 py-1.5 px-2.5 sm:px-4 flex flex-wrap md:flex-nowrap items-center justify-between gap-2 border-b border-black/10 dark:border-white/10 shrink-0 bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-none">
+            <div className="flex items-center space-x-2 sm:space-x-3 min-w-0">
               <button
                 type="button"
                 onClick={() => {
@@ -3108,7 +3551,7 @@ export default function App() {
                     setSidebarCollapsedDesktop(c => !c);
                   }
                 }}
-                className={`px-2 py-1 rounded-lg text-xs font-semibold transition flex items-center space-x-1.5 ${
+                className={`px-2 py-1 rounded-lg text-xs font-semibold transition flex items-center space-x-1.5 shrink-0 ${
                   sidebarOpenMobile || !sidebarCollapsedDesktop
                     ? 'bg-black/10 dark:bg-white/15 text-mac-blue font-bold'
                     : 'bg-black/5 dark:bg-white/10 hover:bg-mac-blue hover:text-white text-slate-600 dark:text-slate-300'
@@ -3119,15 +3562,15 @@ export default function App() {
                 <span className="hidden sm:inline">Filtros</span>
               </button>
 
-              <div className="h-4 w-[1px] bg-black/10 dark:bg-white/10 mx-1 hidden sm:block" />
+              <div className="h-4 w-[1px] bg-black/10 dark:bg-white/10 mx-1 hidden sm:block shrink-0" />
 
-              <div className="flex items-center space-x-2">
-                <span className="text-base">🗺️</span>
-                <div>
-                  <h1 className="font-display font-bold text-xs sm:text-sm leading-none">
+              <div className="flex items-center space-x-2 min-w-0">
+                <span className="text-base shrink-0">🗺️</span>
+                <div className="min-w-0">
+                  <h1 className="font-display font-bold text-xs sm:text-sm leading-none truncate">
                     Mapa Visual de Endereçamento WMS
                   </h1>
-                  <p className="text-[10px] text-slate-500 dark:text-slate-400 font-mono mt-0.5">
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400 font-mono mt-0.5 truncate">
                     Ruas RA–RH • Col. 35 (RF–RH) • Acessórios (AA–AF) • Pulmão (PA–PI)
                   </p>
                 </div>
@@ -3467,12 +3910,13 @@ export default function App() {
                     <button
                       key={rua}
                       type="button"
+                      data-drop-street={rua}
                       onClick={() => selectStreet(rua)}
                       onDragOver={e => {
                         e.preventDefault();
-                        setDragOverKey(`STREET:${rua}`);
+                        setDragOverSafe(`STREET:${rua}`);
                       }}
-                      onDragLeave={() => setDragOverKey(null)}
+                      onDragLeave={e => handleHtmlDragLeave(e, `STREET:${rua}`)}
                       onDrop={e => {
                         e.preventDefault();
                         handleDropOnStreet(rua);
@@ -3480,7 +3924,9 @@ export default function App() {
                       title={`${meta.desc} • ${st.pct}% ocupado (${heat.label})`}
                       style={isHeatmapActive ? heat.cardBgStyle : undefined}
                       className={`mac-card rounded-xl p-2 text-left transition flex flex-col justify-between shrink-0 w-24 sm:w-auto ${
-                        dragOverKey === `STREET:${rua}` ? 'ring-2 ring-purple-500 scale-105' : ''
+                        dragPayload ? 'border-purple-400/50' : ''
+                      } ${
+                        dragOverKey === `STREET:${rua}` ? 'drop-target-hover' : ''
                       } ${
                         isHeatmapActive
                           ? `${heat.borderClass} ${isSelected ? 'ring-2 ring-white shadow-xl scale-102 font-bold' : ''}`
@@ -3553,47 +3999,49 @@ export default function App() {
           {/* ================================================================ */}
           {/* PERSPECTIVES BAR (Aba Local SKU vs Aba Local Barra)              */}
           {/* ================================================================ */}
-          <div className="px-3.5 py-1.5 border-b border-black/10 dark:border-white/10 bg-gradient-to-r from-slate-100/90 via-white/80 to-slate-100/90 dark:from-slate-900 dark:via-slate-900/95 dark:to-slate-900 flex flex-wrap items-center justify-between gap-2 shrink-0">
-            <div className="flex items-center space-x-2">
-              <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400 hidden sm:inline">
+          <div className="px-2.5 sm:px-3.5 py-1.5 border-b border-black/10 dark:border-white/10 bg-gradient-to-r from-slate-100/90 via-white/80 to-slate-100/90 dark:from-slate-900 dark:via-slate-900/95 dark:to-slate-900 flex flex-wrap items-center justify-between gap-2 shrink-0">
+            <div className="flex items-center space-x-2 max-w-full overflow-x-auto no-scrollbar">
+              <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400 hidden sm:inline shrink-0">
                 Perspectiva do Mapa:
               </span>
-              <div className="flex bg-black/10 dark:bg-white/10 p-0.5 rounded-xl text-xs">
+              <div className="flex bg-black/10 dark:bg-white/10 p-0.5 rounded-xl text-xs shrink-0">
                 <button
                   type="button"
                   onClick={() => setWmsPerspective('sku')}
-                  className={`px-3 py-1 rounded-lg font-extrabold transition flex items-center space-x-1.5 ${
+                  className={`px-2.5 sm:px-3 py-1 rounded-lg font-extrabold transition flex items-center space-x-1.5 whitespace-nowrap ${
                     wmsPerspective === 'sku'
                       ? 'bg-mac-blue text-white shadow'
                       : 'text-slate-600 dark:text-slate-300 hover:bg-black/5 dark:hover:bg-white/10'
                   }`}
                 >
                   <span>📍</span>
-                  <span>Aba Local SKU (Local Cadastrado)</span>
+                  <span className="sm:hidden">Local SKU</span>
+                  <span className="hidden sm:inline">Aba Local SKU (Local Cadastrado)</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => setWmsPerspective('barra')}
-                  className={`px-3 py-1 rounded-lg font-extrabold transition flex items-center space-x-1.5 ${
+                  className={`px-2.5 sm:px-3 py-1 rounded-lg font-extrabold transition flex items-center space-x-1.5 whitespace-nowrap ${
                     wmsPerspective === 'barra'
                       ? 'bg-mac-blue text-white shadow'
                       : 'text-slate-600 dark:text-slate-300 hover:bg-black/5 dark:hover:bg-white/10'
                   }`}
                 >
                   <span>🏷️</span>
-                  <span>Aba Local Barra (Local Atual da Peça)</span>
+                  <span className="sm:hidden">Local Barra</span>
+                  <span className="hidden sm:inline">Aba Local Barra (Local Atual da Peça)</span>
                 </button>
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+            <div className="flex flex-wrap items-center gap-2 text-[11px] max-w-full">
               <span className="text-slate-600 dark:text-slate-300 font-medium hidden md:inline">
                 {wmsPerspective === 'sku'
                   ? 'Exibindo Local Cadastrado (destaca sobreposições e alocações multinível).'
                   : 'Exibindo Local Atual da Peça (auditoria física de caixas e SKUs invasores).'}
               </span>
 
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1 overflow-x-auto no-scrollbar max-w-full">
                 <button
                   type="button"
                   onClick={() => setPulseAlertsEnabled(p => !p)}
@@ -3776,12 +4224,12 @@ export default function App() {
             )}
             {/* LEFT SIDEBAR */}
             <aside
-              className={`mac-sidebar shrink-0 flex flex-col justify-between p-3.5 overflow-y-auto select-none transition-all duration-300 z-50 ${
+              className={`mac-sidebar shrink-0 flex flex-col justify-between p-3.5 pb-20 lg:pb-3.5 overflow-y-auto select-none transition-all duration-300 z-50 ${
                 sidebarOpenMobile
-                  ? 'fixed inset-y-0 left-0 w-80 max-w-[85vw] shadow-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-r border-black/15 dark:border-white/15'
+                  ? 'fixed inset-y-0 left-0 w-76 max-w-[85vw] shadow-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-r border-black/15 dark:border-white/15'
                   : sidebarCollapsedDesktop
                     ? 'hidden'
-                    : 'hidden lg:flex w-72 sm:w-80'
+                    : 'hidden lg:flex w-64 xl:w-76'
               }`}
             >
               <div className="space-y-4">
@@ -4057,6 +4505,16 @@ export default function App() {
                     <span className="w-2.5 h-2.5 rounded bg-rose-500 inline-block" />
                     <span className="text-rose-500 font-bold">Conflito</span>
                   </span>
+
+                  <button
+                    type="button"
+                    onClick={() => exportCurrentStreetAddressesCsv(selectedStreet, false)}
+                    className="ml-1 sm:ml-2 px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 text-[10px] sm:text-[11px] font-mono font-bold flex items-center gap-1.5 transition shadow-2xs"
+                    title={`Exportar todos os endereços da Rua ${selectedStreet} em CSV (inclusive vazios, formato puro sem SKUs)`}
+                  >
+                    <span>📍</span>
+                    <span>Exportar Rua {selectedStreet} (Inclusive Vazios)</span>
+                  </button>
                 </div>
               </div>
 
@@ -4095,9 +4553,34 @@ export default function App() {
                 </div>
               )}
 
+              {/* Active Drag HUD Banner */}
+              {dragPayload && (
+                <div className="mx-3 sm:mx-4 mt-2.5 px-3 py-2 rounded-2xl bg-gradient-to-r from-purple-600 via-indigo-600 to-blue-600 text-white shadow-lg border border-white/25 flex flex-wrap items-center justify-between gap-2 z-20 shrink-0">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-base shrink-0">✋</span>
+                    <div className="min-w-0 text-xs">
+                      <span className="font-bold">Movendo de {dragPayload.fromWms}</span>
+                      <span className="mx-1.5 opacity-70">•</span>
+                      <span className="text-purple-100">Solte em outra colmeia ou botão de Rua acima</span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={clearAllDragState}
+                    className="px-2.5 py-1 rounded-xl bg-white/20 hover:bg-white/30 text-white font-bold text-[11px] transition shrink-0"
+                  >
+                    ✕ Cancelar
+                  </button>
+                </div>
+              )}
+
               {/* Scrollable Map Grid */}
               <div
-                className={`flex-1 overflow-y-auto p-3.5 pb-24 lg:pb-3.5 transition-colors duration-500 ${
+                ref={mapScrollContainerRef}
+                onDragOver={e => {
+                  if (dragPayload) autoScrollMapContainer(e.clientY);
+                }}
+                className={`flex-1 overflow-y-auto p-2.5 sm:p-3.5 pb-24 lg:pb-3.5 transition-colors duration-500 ${
                   isHeatmapActive ? 'relative' : ''
                 }`}
                 style={isHeatmapActive ? heatmapData.selectedStreetHeat.mapBgStyle : undefined}
@@ -4230,204 +4713,263 @@ export default function App() {
                     </button>
                   </div>
                 ) : mapMode === 'cards' ? (
-                  <div
-                    className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-2.5 sm:gap-3"
-                    style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' }}
-                  >
-                    {filteredViewData.slots.map(slot => {
-                      const primary = slot.items[0] || null;
-                      const isSelected = selectedAddressKey === slot.wms;
-                      const isSpotlightTarget = spotlightTargetWms === slot.wms;
-                      const isTrbSelected = transbordoSelectedWms.includes(slot.wms);
-                      const isLowGreen = highlightLowStockGreen && slot.isLowStock && !slot.isTransbordo;
-                      const totalSlotQty = slot.items
-                        .filter(i => !i.isTransbordo)
-                        .reduce((acc, it) => acc + (typeof it.qty === 'number' ? it.qty : 1), 0);
+                  (() => {
+                    const targetIdx = spotlightTargetWms
+                      ? filteredViewData.slots.findIndex(s => s.wms === spotlightTargetWms)
+                      : -1;
+                    const effectiveLimit =
+                      targetIdx >= visibleSlotsLimit ? targetIdx + 20 : visibleSlotsLimit;
+                    const visibleCardSlots = filteredViewData.slots.slice(0, effectiveLimit);
+                    const hasMoreCards = visibleCardSlots.length < filteredViewData.slots.length;
 
-                      return (
+                    return (
+                      <div className="space-y-3">
                         <div
-                          key={slot.wms}
-                          id={`wms-card-${slot.wms.replace(/\./g, '-')}`}
-                          data-wms={slot.wms}
-                          draggable={Boolean(primary && !slot.isTransbordo)}
-                          onDragStart={() => {
-                            if (primary && !slot.isTransbordo) {
-                              setDragPayload({
-                                skuId: primary.id,
-                                fromWms: slot.wms,
-                                mode: 'group'
-                              });
-                            }
-                          }}
-                          onDragOver={e => {
-                            e.preventDefault();
-                            setDragOverKey(slot.wms);
-                          }}
-                          onDragLeave={() => setDragOverKey(null)}
-                          onDrop={e => {
-                            e.preventDefault();
-                            handleDropOnSlot(slot.wms);
-                          }}
-                          onClick={() => {
-                            if (interactiveTargetMode === 'pick_empty') {
-                              const activeItem = inspectedSlot.items.find(it => it.id === selectedSkuId) || inspectedSlot.items[0];
-                              if (activeItem) {
-                                handleQuickMoveToEmpty(activeItem, slot.wms);
-                              }
-                              return;
-                            }
-                            if (interactiveTargetMode === 'pick_swap') {
-                              const activeItem = inspectedSlot.items.find(it => it.id === selectedSkuId) || inspectedSlot.items[0];
-                              if (activeItem) {
-                                handleSwapSlots(activeItem, slot.wms);
-                              }
-                              return;
-                            }
-                            if (transbordoSelectMode) {
-                              handleToggleTransbordoSlotSelection(slot.wms);
-                            } else {
-                              setSelectedAddressKey(slot.wms);
-                              if (primary) setSelectedSkuId(primary.id);
-                              if (typeof window !== 'undefined' && window.innerWidth < 1024) {
-                                setInspectorOpenMobile(true);
-                              }
-                            }
-                          }}
-                          className={`mac-card rounded-2xl p-3 cursor-pointer flex flex-col justify-between min-h-[120px] relative transition-all duration-300 ${
-                            slot.isTransbordo
-                              ? 'transbordo-card'
-                              : isLowGreen
-                                ? 'low-stock-green-card'
-                                : slot.isConflict
-                                  ? pulseAlertsEnabled
-                                    ? 'slot-conflict-pulse'
-                                    : 'border-2 border-rose-500 bg-rose-500/10'
-                                  : slot.isInvader
-                                    ? pulseAlertsEnabled
-                                      ? 'slot-invader-pulse'
-                                      : 'border-2 border-amber-500 bg-amber-500/10'
-                                    : primary
-                                      ? 'border-emerald-500/35 bg-emerald-500/[0.04]'
-                                      : ''
-                          } ${
-                            isSpotlightTarget
-                              ? 'ring-4 ring-amber-400 dark:ring-amber-300 ring-offset-2 ring-offset-white dark:ring-offset-slate-900 shadow-2xl scale-[1.03] z-20 animate-pulse bg-amber-500/15'
-                              : isSelected
-                                ? 'ring-2 ring-mac-blue shadow-lg'
-                                : ''
-                          } ${
-                            isTrbSelected ? 'transbordo-selected-slot' : ''
-                          } ${dragOverKey === slot.wms ? 'ring-2 ring-purple-500 scale-[1.02]' : ''}`}
+                          className="grid gap-2.5 sm:gap-3"
+                          style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(210px, 100%), 1fr))' }}
                         >
-                          {/* Spotlight Target Active Beacon Banner */}
-                          {isSpotlightTarget && (
-                            <div className="mb-2 px-2.5 py-1 rounded-xl bg-gradient-to-r from-amber-400 via-amber-500 to-orange-500 text-slate-950 font-black text-[10px] sm:text-[11px] flex items-center justify-between shadow-md">
-                              <span className="flex items-center gap-1.5">
-                                <span className="w-2 h-2 rounded-full bg-slate-950 animate-ping inline-block" />
-                                <span>🎯 LOCALIZADO NO SPOTLIGHT</span>
-                              </span>
-                              <span className="font-mono text-[9px] uppercase px-1.5 py-0.2 rounded bg-black/20 text-slate-950 font-extrabold">
-                                Foco Ativo
-                              </span>
-                            </div>
-                          )}
+                          {visibleCardSlots.map(slot => {
+                            const primary = slot.items[0] || null;
+                            const isSelected = selectedAddressKey === slot.wms;
+                            const isSpotlightTarget = spotlightTargetWms === slot.wms;
+                            const isTrbSelected = transbordoSelectedWms.includes(slot.wms);
+                            const isLowGreen = highlightLowStockGreen && slot.isLowStock && !slot.isTransbordo;
+                            const isDragSource = dragPayload?.fromWms === slot.wms;
+                            const isDropHover = dragOverKey === slot.wms;
+                            const totalSlotQty = slot.items
+                              .filter(i => !i.isTransbordo)
+                              .reduce((acc, it) => acc + (typeof it.qty === 'number' ? it.qty : 1), 0);
 
-                          {/* Top Row: WMS Address Badge + Status */}
-                          <div className="flex items-center justify-between gap-1">
-                            <span
-                              className={`font-mono text-xs font-extrabold px-2 py-0.5 rounded-md ${
-                                isSpotlightTarget
-                                  ? 'bg-amber-400 text-slate-950 font-black shadow'
-                                  : slot.isTransbordo
-                                    ? 'bg-yellow-400 text-slate-950 border border-yellow-600'
-                                    : slot.isConflict
-                                      ? 'bg-rose-600 text-white'
-                                      : primary
-                                        ? 'bg-mac-blue text-white'
-                                        : 'bg-black/10 dark:bg-white/10 text-slate-600 dark:text-slate-300'
-                              }`}
-                            >
-                              {slot.wms}
-                            </span>
+                            return (
+                              <div
+                                key={slot.wms}
+                                id={`wms-card-${slot.wms.replace(/\./g, '-')}`}
+                                data-wms={slot.wms}
+                                data-drop-wms={slot.wms}
+                                draggable={Boolean(primary && !slot.isTransbordo)}
+                                onDragStart={e => {
+                                  if (primary && !slot.isTransbordo) {
+                                    e.dataTransfer.effectAllowed = 'move';
+                                    e.dataTransfer.setData('text/plain', slot.wms);
+                                    setDragPayload({
+                                      skuId: primary.id,
+                                      fromWms: slot.wms,
+                                      mode: 'group'
+                                    });
+                                  }
+                                }}
+                                onDragEnd={clearAllDragState}
+                                onDragOver={e => {
+                                  e.preventDefault();
+                                  setDragOverSafe(slot.wms);
+                                }}
+                                onDragLeave={e => handleHtmlDragLeave(e, slot.wms)}
+                                onDrop={e => {
+                                  e.preventDefault();
+                                  handleDropOnSlot(slot.wms);
+                                }}
+                                onPointerDown={e => {
+                                  if (primary && !slot.isTransbordo) {
+                                    startPointerDrag(e, primary, slot.wms, false);
+                                  }
+                                }}
+                                onClick={() => {
+                                  if (Date.now() < suppressNextClickRef.current) return;
+                                  if (interactiveTargetMode === 'pick_empty') {
+                                    const activeItem = inspectedSlot.items.find(it => it.id === selectedSkuId) || inspectedSlot.items[0];
+                                    if (activeItem) {
+                                      handleQuickMoveToEmpty(activeItem, slot.wms);
+                                    }
+                                    return;
+                                  }
+                                  if (interactiveTargetMode === 'pick_swap') {
+                                    const activeItem = inspectedSlot.items.find(it => it.id === selectedSkuId) || inspectedSlot.items[0];
+                                    if (activeItem) {
+                                      handleSwapSlots(activeItem, slot.wms);
+                                    }
+                                    return;
+                                  }
+                                  if (transbordoSelectMode) {
+                                    handleToggleTransbordoSlotSelection(slot.wms);
+                                  } else {
+                                    setSelectedAddressKey(slot.wms);
+                                    if (primary) setSelectedSkuId(primary.id);
+                                    if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+                                      setInspectorOpenMobile(true);
+                                    }
+                                  }
+                                }}
+                                className={`mac-card rounded-2xl p-3 cursor-pointer flex flex-col justify-between min-h-[120px] relative transition-all duration-200 ${
+                                  slot.isTransbordo
+                                    ? 'transbordo-card'
+                                    : isLowGreen
+                                      ? 'low-stock-green-card'
+                                      : slot.isConflict
+                                        ? pulseAlertsEnabled
+                                          ? 'slot-conflict-pulse'
+                                          : 'border-2 border-rose-500 bg-rose-500/10'
+                                        : slot.isInvader
+                                          ? pulseAlertsEnabled
+                                            ? 'slot-invader-pulse'
+                                            : 'border-2 border-amber-500 bg-amber-500/10'
+                                          : primary
+                                            ? 'border-emerald-500/35 bg-emerald-500/[0.04]'
+                                            : ''
+                                } ${
+                                  isSpotlightTarget
+                                    ? 'ring-4 ring-amber-400 dark:ring-amber-300 ring-offset-2 ring-offset-white dark:ring-offset-slate-900 shadow-2xl scale-[1.03] z-20 animate-pulse bg-amber-500/15'
+                                    : isSelected
+                                      ? 'ring-2 ring-mac-blue shadow-lg'
+                                      : ''
+                                } ${
+                                  isTrbSelected ? 'transbordo-selected-slot' : ''
+                                } ${isDragSource ? 'drag-source-active' : ''} ${
+                                  isDropHover ? 'drop-target-hover' : ''
+                                }`}
+                              >
+                                {/* Spotlight Target Active Beacon Banner */}
+                                {isSpotlightTarget && (
+                                  <div className="mb-2 px-2.5 py-1 rounded-xl bg-gradient-to-r from-amber-400 via-amber-500 to-orange-500 text-slate-950 font-black text-[10px] sm:text-[11px] flex items-center justify-between shadow-md">
+                                    <span className="flex items-center gap-1.5">
+                                      <span className="w-2 h-2 rounded-full bg-slate-950 animate-ping inline-block" />
+                                      <span>🎯 LOCALIZADO NO SPOTLIGHT</span>
+                                    </span>
+                                    <span className="font-mono text-[9px] uppercase px-1.5 py-0.2 rounded bg-black/20 text-slate-950 font-extrabold">
+                                      Foco Ativo
+                                    </span>
+                                  </div>
+                                )}
 
-                            {slot.isTransbordo ? (
-                              <span className="text-[10px] font-mono font-extrabold px-2 py-0.5 rounded-full bg-yellow-400 text-slate-950 border border-yellow-600">
-                                ⚡ BLOQUEADO
-                              </span>
-                            ) : slot.isConflict ? (
-                              <span className="text-[10px] font-mono font-extrabold px-2 py-0.5 rounded-full bg-rose-600 text-white flex items-center gap-1 shadow-sm">
-                                <span className="w-1.5 h-1.5 rounded-full bg-white animate-ping" />
-                                <span>🚨 {slot.items.length > 1 ? `${slot.items.length} SKUs` : 'DIVIDIDO'}</span>
-                              </span>
-                            ) : slot.isInvader ? (
-                              <span className="text-[10px] font-mono font-extrabold px-2 py-0.5 rounded-full bg-amber-500 text-slate-950 flex items-center gap-1 shadow-sm">
-                                <span className="w-1.5 h-1.5 rounded-full bg-slate-950/70 animate-ping" />
-                                <span>⚠️ INVASOR</span>
-                              </span>
-                            ) : isLowGreen ? (
-                              <span className="text-[10px] font-mono font-extrabold px-2 py-0.5 rounded-full bg-emerald-600 text-white">
-                                🟢 {totalSlotQty} pçs
-                              </span>
-                            ) : primary ? (
-                              <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-700 dark:text-emerald-300">
-                                {totalSlotQty} pçs
-                              </span>
-                            ) : (
-                              <span className="text-[10px] font-mono text-slate-400">LIVRE</span>
-                            )}
-                          </div>
+                                {/* Top Row: WMS Address Badge + Touch Grip + Status */}
+                                <div className="flex items-center justify-between gap-1">
+                                  <div className="flex items-center gap-1">
+                                    {primary && !slot.isTransbordo && (
+                                      <span
+                                        onPointerDown={e => startPointerDrag(e, primary, slot.wms, true)}
+                                        onClick={e => e.stopPropagation()}
+                                        className="touch-none cursor-grab active:cursor-grabbing px-1 py-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 text-slate-400 hover:text-mac-blue select-none text-xs leading-none"
+                                        title="Segure ou arraste para mover SKU"
+                                      >
+                                        ⠿
+                                      </span>
+                                    )}
+                                    <span
+                                      className={`font-mono text-xs font-extrabold px-2 py-0.5 rounded-md ${
+                                        isSpotlightTarget
+                                          ? 'bg-amber-400 text-slate-950 font-black shadow'
+                                          : slot.isTransbordo
+                                            ? 'bg-yellow-400 text-slate-950 border border-yellow-600'
+                                            : slot.isConflict
+                                              ? 'bg-rose-600 text-white'
+                                              : primary
+                                                ? 'bg-mac-blue text-white'
+                                                : 'bg-black/10 dark:bg-white/10 text-slate-600 dark:text-slate-300'
+                                      }`}
+                                    >
+                                      {slot.wms}
+                                    </span>
+                                  </div>
 
-                          {/* Body Content */}
-                          {primary ? (
-                            <div className="my-2 space-y-1">
-                              <div className="flex items-center space-x-1.5">
-                                <span className="text-sm">{primary.icon || '📦'}</span>
-                                <span className="font-mono text-xs font-extrabold tracking-tight truncate">
-                                  {primary.code}
-                                </span>
+                                  {slot.isTransbordo ? (
+                                    <span className="text-[10px] font-mono font-extrabold px-2 py-0.5 rounded-full bg-yellow-400 text-slate-950 border border-yellow-600">
+                                      ⚡ BLOQUEADO
+                                    </span>
+                                  ) : slot.isConflict ? (
+                                    <span className="text-[10px] font-mono font-extrabold px-2 py-0.5 rounded-full bg-rose-600 text-white flex items-center gap-1 shadow-sm">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-white animate-ping" />
+                                      <span>🚨 {slot.items.length > 1 ? `${slot.items.length} SKUs` : 'DIVIDIDO'}</span>
+                                    </span>
+                                  ) : slot.isInvader ? (
+                                    <span className="text-[10px] font-mono font-extrabold px-2 py-0.5 rounded-full bg-amber-500 text-slate-950 flex items-center gap-1 shadow-sm">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-slate-950/70 animate-ping" />
+                                      <span>⚠️ INVASOR</span>
+                                    </span>
+                                  ) : isLowGreen ? (
+                                    <span className="text-[10px] font-mono font-extrabold px-2 py-0.5 rounded-full bg-emerald-600 text-white">
+                                      🟢 {totalSlotQty} pçs
+                                    </span>
+                                  ) : primary ? (
+                                    <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-700 dark:text-emerald-300">
+                                      {totalSlotQty} pçs
+                                    </span>
+                                  ) : (
+                                    <span className="text-[10px] font-mono text-slate-400">LIVRE</span>
+                                  )}
+                                </div>
+
+                                {/* Body Content */}
+                                {primary ? (
+                                  <div className="my-2 space-y-1">
+                                    <div className="flex items-center space-x-1.5">
+                                      <span className="text-sm">{primary.icon || '📦'}</span>
+                                      <span className="font-mono text-xs font-extrabold tracking-tight truncate">
+                                        {primary.code}
+                                      </span>
+                                    </div>
+                                    <p className="text-[11px] text-slate-600 dark:text-slate-300 truncate font-medium">
+                                      {primary.name}
+                                    </p>
+                                  </div>
+                                ) : (
+                                  <div className="my-3 text-center">
+                                    <p className="text-[11px] text-slate-400 font-medium">
+                                      Colmeia Disponível
+                                    </p>
+                                  </div>
+                                )}
+
+                                {/* Bottom Row: Color Swatch & Raw Local */}
+                                <div className="flex items-center justify-between text-[10px] font-mono pt-1 border-t border-black/5 dark:border-white/5">
+                                  {primary ? (
+                                    <>
+                                      <span className="flex items-center space-x-1.5 truncate">
+                                        <span
+                                          className="w-2.5 h-2.5 rounded-full border border-black/20 shrink-0"
+                                          style={{ backgroundColor: primary.colorHex }}
+                                        />
+                                        <span className="truncate text-slate-500 dark:text-slate-400">
+                                          {primary.colorName} • {primary.size}
+                                        </span>
+                                      </span>
+                                      <span className="text-mac-blue font-bold truncate ml-1">
+                                        {primary.rawLocal}
+                                      </span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <span className="text-slate-400">Torre {slot.pos}</span>
+                                      <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
+                                        + Alocar
+                                      </span>
+                                    </>
+                                  )}
+                                </div>
                               </div>
-                              <p className="text-[11px] text-slate-600 dark:text-slate-300 truncate font-medium">
-                                {primary.name}
-                              </p>
-                            </div>
-                          ) : (
-                            <div className="my-3 text-center">
-                              <p className="text-[11px] text-slate-400 font-medium">
-                                Colmeia Disponível
-                              </p>
-                            </div>
-                          )}
-
-                          {/* Bottom Row: Color Swatch & Raw Local */}
-                          <div className="flex items-center justify-between text-[10px] font-mono pt-1 border-t border-black/5 dark:border-white/5">
-                            {primary ? (
-                              <>
-                                <span className="flex items-center space-x-1.5 truncate">
-                                  <span
-                                    className="w-2.5 h-2.5 rounded-full border border-black/20 shrink-0"
-                                    style={{ backgroundColor: primary.colorHex }}
-                                  />
-                                  <span className="truncate text-slate-500 dark:text-slate-400">
-                                    {primary.colorName} • {primary.size}
-                                  </span>
-                                </span>
-                                <span className="text-mac-blue font-bold truncate ml-1">
-                                  {primary.rawLocal}
-                                </span>
-                              </>
-                            ) : (
-                              <>
-                                <span className="text-slate-400">Torre {slot.pos}</span>
-                                <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
-                                  + Alocar
-                                </span>
-                              </>
-                            )}
-                          </div>
+                            );
+                          })}
                         </div>
-                      );
-                    })}
-                  </div>
+
+                        {hasMoreCards && (
+                          <div className="flex flex-wrap items-center justify-center gap-2 pt-2 pb-4">
+                            <button
+                              type="button"
+                              onClick={() => setVisibleSlotsLimit(v => v + 180)}
+                              className="px-4 py-2 rounded-xl bg-mac-blue hover:bg-blue-500 text-white font-bold text-xs shadow transition"
+                            >
+                              + Carregar mais ({visibleCardSlots.length} de {filteredViewData.slots.length})
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setVisibleSlotsLimit(filteredViewData.slots.length)}
+                              className="px-3.5 py-2 rounded-xl bg-black/10 dark:bg-white/10 hover:bg-black/15 dark:hover:bg-white/15 font-semibold text-xs transition"
+                            >
+                              Exibir todos ({filteredViewData.slots.length})
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()
                 ) : (
                   /* VISTA DO PORTA-PALETES (MÓDULOS DE TORRES VERTICAIS / MATRIZ PANORÂMICA) */
                   (() => {
@@ -4467,6 +5009,7 @@ export default function App() {
                       : (towerSubchunks.find(c => c.id === rackTowerFilter)?.positions || uniquePositions);
 
                     const handleCellClick = (wms: string, primary: any) => {
+                      if (Date.now() < suppressNextClickRef.current) return;
                       if (interactiveTargetMode === 'pick_empty') {
                         const activeItem = inspectedSlot.items.find(it => it.id === selectedSkuId) || inspectedSlot.items[0];
                         if (activeItem) {
@@ -4570,7 +5113,10 @@ export default function App() {
                         {/* OPÇÃO 1: MÓDULOS DE TORRES VERTICAIS (RESPONSIVO SEM SCROLL)  */}
                         {/* ============================================================== */}
                         {rackLayoutMode === 'columns' ? (
-                          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
+                          <div
+                            className="grid gap-3"
+                            style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(265px, 100%), 1fr))' }}
+                          >
                             {activePositions.map(pos => {
                               const maxLvTower = getMaxLevelsForStreet(selectedStreet, pos);
                               const towerLevelsDesc = Array.from(
@@ -4655,9 +5201,12 @@ export default function App() {
                                           key={lv}
                                           id={`wms-cell-${wms.replace(/\./g, '-')}`}
                                           data-wms={wms}
+                                          data-drop-wms={wms}
                                           draggable={Boolean(primary && !isTrb)}
-                                          onDragStart={() => {
+                                          onDragStart={e => {
                                             if (primary && !isTrb) {
+                                              e.dataTransfer.effectAllowed = 'move';
+                                              e.dataTransfer.setData('text/plain', wms);
                                               setDragPayload({
                                                 skuId: primary.id,
                                                 fromWms: wms,
@@ -4665,17 +5214,23 @@ export default function App() {
                                               });
                                             }
                                           }}
+                                          onDragEnd={clearAllDragState}
                                           onDragOver={e => {
                                             e.preventDefault();
-                                            setDragOverKey(wms);
+                                            setDragOverSafe(wms);
                                           }}
-                                          onDragLeave={() => setDragOverKey(null)}
+                                          onDragLeave={e => handleHtmlDragLeave(e, wms)}
                                           onDrop={e => {
                                             e.preventDefault();
                                             handleDropOnSlot(wms);
                                           }}
+                                          onPointerDown={e => {
+                                            if (primary && !isTrb) {
+                                              startPointerDrag(e, primary, wms, false);
+                                            }
+                                          }}
                                           onClick={() => handleCellClick(wms, primary)}
-                                          className={`min-h-[50px] rounded-xl p-2 flex items-center justify-between gap-2.5 cursor-pointer transition relative text-[11px] font-mono border ${
+                                          className={`min-h-[50px] rounded-xl p-2 flex items-center justify-between gap-2 cursor-pointer transition relative text-[11px] font-mono border ${
                                             isTrb
                                               ? 'transbordo-rack-cell'
                                               : isLow
@@ -4698,11 +5253,23 @@ export default function App() {
                                                 ? 'ring-2 ring-mac-blue shadow-md border-mac-blue bg-mac-blue/10'
                                                 : ''
                                           } ${isTrbSelected ? 'transbordo-selected-slot' : ''} ${
+                                            dragPayload?.fromWms === wms ? 'drag-source-active' : ''
+                                          } ${
                                             dragOverKey === wms
-                                              ? 'ring-2 ring-purple-500 scale-[1.02]'
+                                              ? 'drop-target-hover'
                                               : ''
                                           }`}
                                         >
+                                          {primary && !isTrb && (
+                                            <span
+                                              onPointerDown={e => startPointerDrag(e, primary, wms, true)}
+                                              onClick={e => e.stopPropagation()}
+                                              className="touch-none cursor-grab active:cursor-grabbing px-0.5 py-1 rounded hover:bg-black/10 dark:hover:bg-white/10 text-slate-400 hover:text-mac-blue select-none text-xs leading-none shrink-0"
+                                              title="Segure ou arraste para mover SKU"
+                                            >
+                                              ⠿
+                                            </span>
+                                          )}
                                           {/* Level Indicator Pill */}
                                           <div
                                             className={`px-2 py-1 rounded-lg font-mono text-[10px] font-extrabold flex flex-col items-center justify-center shrink-0 min-w-[44px] ${
@@ -4877,9 +5444,12 @@ export default function App() {
                                               <div
                                                 id={`wms-cell-matrix-${wms.replace(/\./g, '-')}`}
                                                 data-wms={wms}
+                                                data-drop-wms={wms}
                                                 draggable={Boolean(primary && !isTrb)}
-                                                onDragStart={() => {
+                                                onDragStart={e => {
                                                   if (primary && !isTrb) {
+                                                    e.dataTransfer.effectAllowed = 'move';
+                                                    e.dataTransfer.setData('text/plain', wms);
                                                     setDragPayload({
                                                       skuId: primary.id,
                                                       fromWms: wms,
@@ -4887,14 +5457,20 @@ export default function App() {
                                                     });
                                                   }
                                                 }}
+                                                onDragEnd={clearAllDragState}
                                                 onDragOver={e => {
                                                   e.preventDefault();
-                                                  setDragOverKey(wms);
+                                                  setDragOverSafe(wms);
                                                 }}
-                                                onDragLeave={() => setDragOverKey(null)}
+                                                onDragLeave={e => handleHtmlDragLeave(e, wms)}
                                                 onDrop={e => {
                                                   e.preventDefault();
                                                   handleDropOnSlot(wms);
+                                                }}
+                                                onPointerDown={e => {
+                                                  if (primary && !isTrb) {
+                                                    startPointerDrag(e, primary, wms, false);
+                                                  }
                                                 }}
                                                 onClick={() => handleCellClick(wms, primary)}
                                                 className={`h-16 rounded-xl p-1.5 flex flex-col justify-between cursor-pointer transition relative text-[10px] font-mono ${
@@ -4920,8 +5496,10 @@ export default function App() {
                                                       ? 'ring-2 ring-mac-blue shadow-md border-mac-blue'
                                                       : ''
                                                 } ${isTrbSelected ? 'transbordo-selected-slot' : ''} ${
+                                                  dragPayload?.fromWms === wms ? 'drag-source-active' : ''
+                                                } ${
                                                   dragOverKey === wms
-                                                    ? 'ring-2 ring-purple-500 scale-[1.04]'
+                                                    ? 'drop-target-hover'
                                                     : ''
                                                 }`}
                                               >
@@ -5012,12 +5590,12 @@ export default function App() {
             )}
             {/* RIGHT INSPECTOR PANEL */}
             <aside
-              className={`shrink-0 border-l border-black/10 dark:border-white/10 p-3.5 overflow-y-auto flex flex-col justify-between transition-all duration-300 z-50 ${
+              className={`shrink-0 border-l border-black/10 dark:border-white/10 p-3.5 pb-20 lg:pb-3.5 overflow-y-auto flex flex-col justify-between transition-all duration-300 z-50 ${
                 inspectorOpenMobile
                   ? 'fixed inset-y-0 right-0 w-88 max-w-[92vw] shadow-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-l border-black/15 dark:border-white/15'
                   : inspectorCollapsedDesktop
                     ? 'hidden'
-                    : 'hidden lg:flex w-88 max-w-[92vw] bg-white/45 dark:bg-black/25'
+                    : 'hidden lg:flex w-72 xl:w-88 max-w-[92vw] bg-white/45 dark:bg-black/25'
               }`}
             >
               <div className="space-y-4">
@@ -5781,9 +6359,9 @@ export default function App() {
       {/* MODAL 1: IMPORT CSV                                                  */}
       {/* ==================================================================== */}
       {showImportModal && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4">
           <div className="mac-window mac-sheet w-full max-w-xl rounded-2xl overflow-hidden shadow-2xl border border-white/20">
-            <div className="px-5 py-3.5 border-b border-black/10 dark:border-white/10 flex items-center justify-between bg-emerald-500/10">
+            <div className="px-4 sm:px-5 py-3 border-b border-black/10 dark:border-white/10 flex items-center justify-between bg-emerald-500/10">
               <div className="flex items-center space-x-2">
                 <span className="text-lg">📥</span>
                 <div>
@@ -5804,7 +6382,7 @@ export default function App() {
               </button>
             </div>
 
-            <div className="p-5 space-y-4 text-xs max-h-[82vh] overflow-y-auto">
+            <div className="p-3.5 sm:p-5 space-y-4 text-xs max-h-[88dvh] overflow-y-auto">
               <label className="flex flex-col items-center justify-center p-4 border-2 border-dashed border-emerald-500/40 rounded-2xl bg-emerald-500/5 hover:bg-emerald-500/10 cursor-pointer transition text-center">
                 <span className="text-2xl mb-1">📄</span>
                 <span className="font-bold text-emerald-600 dark:text-emerald-300">
@@ -5959,9 +6537,9 @@ export default function App() {
       {/* MODAL 2: ALLOCATE / EDIT SKU                                         */}
       {/* ==================================================================== */}
       {showSkuModal && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4">
           <div className="mac-window mac-sheet w-full max-w-lg rounded-2xl overflow-hidden shadow-2xl border border-white/20">
-            <div className="px-5 py-3.5 border-b border-black/10 dark:border-white/10 flex items-center justify-between bg-white/30 dark:bg-black/20">
+            <div className="px-4 sm:px-5 py-3 border-b border-black/10 dark:border-white/10 flex items-center justify-between bg-white/30 dark:bg-black/20">
               <div className="flex items-center space-x-2">
                 <span>📦</span>
                 <h3 className="font-display font-bold text-sm">
@@ -5989,22 +6567,27 @@ export default function App() {
                   );
                   return;
                 }
+                const parsedSubmit = parseFullSkuString(skuFormCode);
                 const dec = decodeSkuPrefix(skuFormCode, skuFormColor, skuFormSize);
+                const finalCode = parsedSubmit.isComplete
+                  ? `${parsedSubmit.dMarca}${parsedSubmit.dEtiqueta}${parsedSubmit.dGrupo}${parsedSubmit.modelSeq} - ${parsedSubmit.colorCode} - ${parsedSubmit.size}`
+                  : skuFormCode.trim().toUpperCase();
+                const finalName = skuFormName.trim() || dec.autoName;
                 const groupedLocal = formatLevelsToSisplanLocal(
                   skuFormRua,
                   skuFormPos,
                   skuFormSelectedLevels
                 );
-                const skuKey = getCanonicalSkuKey(skuFormCode);
+                const skuKey = getCanonicalSkuKey(finalCode);
                 const filtered = skus.filter(
                   s => getCanonicalSkuKey(s.code) !== skuKey && s.id !== skuFormEditId
                 );
 
                 const created: SkuItem[] = skuFormSelectedLevels.map((lv, idx) => ({
                   id: idx === 0 && skuFormEditId ? skuFormEditId : `sku-${Date.now()}-${lv}-${idx}`,
-                  code: skuFormCode.trim().toUpperCase(),
+                  code: finalCode,
                   codigoBase: dec.dMarca + dec.dEtiqueta + dec.dGrupo + dec.modelSeq,
-                  name: skuFormName.trim() || dec.autoName,
+                  name: finalName,
                   brand: dec.marca,
                   label: dec.etiqueta,
                   groupCode: dec.dGrupo,
@@ -6031,27 +6614,25 @@ export default function App() {
                 setSelectedSkuId(created[0].id);
                 persistCurrentState(nextSkus, movedSkusRegistry, transbordoRegistry);
                 setShowSkuModal(false);
+                scrollToWmsSlot(created[0].wms, skuFormRua, skuFormPos);
                 playMacSound('success', soundEnabled);
-                showToast('SKU Alocado no Mapa', `${skuFormCode} salvo em ${groupedLocal}`, '🏢');
+                showToast('SKU Alocado no Mapa', `${finalCode} salvo em ${groupedLocal}`, '🏢');
               }}
-              className="p-5 space-y-3.5 text-xs max-h-[82vh] overflow-y-auto"
+              className="p-3.5 sm:p-5 space-y-3 text-xs max-h-[88dvh] overflow-y-auto"
             >
               {/* Aero Taxonomy Builder */}
               <div className="p-3 rounded-xl bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 space-y-2.5">
-                <div className="grid grid-cols-4 gap-2">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   <div>
                     <label className="block text-[10px] text-slate-400 mb-0.5">1º Díg. Marca</label>
                     <select
                       value={skuFormBrand}
-                      onChange={e => {
-                        const b = e.target.value;
-                        setSkuFormBrand(b);
-                        setSkuFormCode(
-                          `${b}${skuFormLabel}${skuFormGroup}${skuFormSeq} - ${skuFormColor} - ${skuFormSize}`
-                        );
-                      }}
+                      onChange={e => updateSkuFromParts({ brand: e.target.value })}
                       className="w-full px-2 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-black/10 dark:border-white/15 font-mono text-[11px]"
                     >
+                      {!AERO_BRANDS[skuFormBrand] && skuFormBrand && (
+                        <option value={skuFormBrand}>{skuFormBrand} - Marca {skuFormBrand}</option>
+                      )}
                       {Object.entries(AERO_BRANDS).map(([k, v]) => (
                         <option key={k} value={k}>
                           {k} - {v}
@@ -6063,15 +6644,12 @@ export default function App() {
                     <label className="block text-[10px] text-slate-400 mb-0.5">2º Etiqueta</label>
                     <select
                       value={skuFormLabel}
-                      onChange={e => {
-                        const l = e.target.value;
-                        setSkuFormLabel(l);
-                        setSkuFormCode(
-                          `${skuFormBrand}${l}${skuFormGroup}${skuFormSeq} - ${skuFormColor} - ${skuFormSize}`
-                        );
-                      }}
+                      onChange={e => updateSkuFromParts({ label: e.target.value })}
                       className="w-full px-2 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-black/10 dark:border-white/15 font-mono text-[11px]"
                     >
+                      {!AERO_LABELS[skuFormLabel] && skuFormLabel && (
+                        <option value={skuFormLabel}>{skuFormLabel} - Etiqueta {skuFormLabel}</option>
+                      )}
                       {Object.entries(AERO_LABELS).map(([k, v]) => (
                         <option key={k} value={k}>
                           {k} - {v}
@@ -6083,20 +6661,19 @@ export default function App() {
                     <label className="block text-[10px] text-slate-400 mb-0.5">3º–4º Grupo</label>
                     <select
                       value={skuFormGroup}
-                      onChange={e => {
-                        const g = e.target.value;
-                        setSkuFormGroup(g);
-                        setSkuFormCode(
-                          `${skuFormBrand}${skuFormLabel}${g}${skuFormSeq} - ${skuFormColor} - ${skuFormSize}`
-                        );
-                      }}
+                      onChange={e => updateSkuFromParts({ group: e.target.value })}
                       className="w-full px-2 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-black/10 dark:border-white/15 font-mono text-[11px]"
                     >
-                      {Object.entries(AERO_GROUPS).map(([k, v]) => (
-                        <option key={k} value={k}>
-                          {k} - {v.name}
-                        </option>
-                      ))}
+                      {!AERO_GROUPS[skuFormGroup] && skuFormGroup && (
+                        <option value={skuFormGroup}>{skuFormGroup} - Grupo {skuFormGroup}</option>
+                      )}
+                      {Object.entries(AERO_GROUPS)
+                        .filter(([k]) => k.length === 2)
+                        .map(([k, v]) => (
+                          <option key={k} value={k}>
+                            {k} - {v.name}
+                          </option>
+                        ))}
                     </select>
                   </div>
                   <div>
@@ -6105,13 +6682,7 @@ export default function App() {
                       type="text"
                       maxLength={4}
                       value={skuFormSeq}
-                      onChange={e => {
-                        const sq = e.target.value.replace(/\D/g, '').padStart(4, '0');
-                        setSkuFormSeq(e.target.value);
-                        setSkuFormCode(
-                          `${skuFormBrand}${skuFormLabel}${skuFormGroup}${sq} - ${skuFormColor} - ${skuFormSize}`
-                        );
-                      }}
+                      onChange={e => updateSkuFromParts({ seq: e.target.value.replace(/\D/g, '') })}
                       className="w-full px-2 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-black/10 dark:border-white/15 font-mono text-[11px] font-bold"
                     />
                   </div>
@@ -6122,15 +6693,12 @@ export default function App() {
                     <label className="block text-[10px] text-slate-400 mb-0.5">Cor Oficial</label>
                     <select
                       value={skuFormColor}
-                      onChange={e => {
-                        const c = e.target.value;
-                        setSkuFormColor(c);
-                        setSkuFormCode(
-                          `${skuFormBrand}${skuFormLabel}${skuFormGroup}${skuFormSeq} - ${c} - ${skuFormSize}`
-                        );
-                      }}
+                      onChange={e => updateSkuFromParts({ color: e.target.value })}
                       className="w-full px-2 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-black/10 dark:border-white/15 font-mono text-[11px]"
                     >
+                      {!OFFICIAL_COLORS[skuFormColor] && skuFormColor && (
+                        <option value={skuFormColor}>{skuFormColor} - Cor {skuFormColor}</option>
+                      )}
                       {Object.entries(OFFICIAL_COLORS).map(([k, v]) => (
                         <option key={k} value={k}>
                           {k} - {v.name}
@@ -6143,21 +6711,15 @@ export default function App() {
                     <input
                       type="text"
                       value={skuFormSize}
-                      onChange={e => {
-                        const sz = e.target.value.toUpperCase();
-                        setSkuFormSize(sz);
-                        setSkuFormCode(
-                          `${skuFormBrand}${skuFormLabel}${skuFormGroup}${skuFormSeq} - ${skuFormColor} - ${sz}`
-                        );
-                      }}
+                      onChange={e => updateSkuFromParts({ size: e.target.value.toUpperCase() })}
                       className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-black/10 dark:border-white/15 font-mono text-[11px] font-bold"
                     />
                   </div>
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-3">
-                <div className="col-span-2">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 sm:gap-3">
+                <div className="sm:col-span-2">
                   <label className="block text-[11px] font-semibold mb-1 text-slate-400">
                     SKU Completo (CODIGO - COR - TAMANHO)
                   </label>
@@ -6165,8 +6727,9 @@ export default function App() {
                     type="text"
                     required
                     value={skuFormCode}
-                    onChange={e => setSkuFormCode(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-black/5 dark:bg-white/10 border border-black/10 dark:border-white/15 font-mono font-bold"
+                    onChange={e => syncSkuFormFromFullCode(e.target.value)}
+                    placeholder="Ex: 11060127 - 102 - M ou 11060127102M"
+                    className="w-full px-3 py-2 rounded-xl bg-black/5 dark:bg-white/10 border border-black/10 dark:border-white/15 font-mono font-bold focus:outline-none focus:ring-2 focus:ring-mac-blue"
                   />
                 </div>
                 <div>
@@ -6183,9 +6746,63 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Descrição do Produto (Auto-gerada pelo código) + Preview */}
+              {(() => {
+                const liveDec = decodeSkuPrefix(skuFormCode, skuFormColor, skuFormSize);
+                return (
+                  <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="text-[11px] font-bold text-emerald-700 dark:text-emerald-300">
+                        Descrição do Produto (Auto-gerada pelo código)
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSkuFormNameManuallyEdited(false);
+                          setSkuFormName(liveDec.autoName);
+                          playMacSound('pop', soundEnabled);
+                        }}
+                        className="px-2 py-0.5 rounded-md bg-emerald-600/20 hover:bg-emerald-600 hover:text-white text-emerald-700 dark:text-emerald-300 font-mono text-[10px] font-bold transition"
+                        title="Recalcular descrição automática com base no SKU"
+                      >
+                        ↺ Auto
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      value={skuFormName}
+                      onChange={e => {
+                        setSkuFormName(e.target.value);
+                        setSkuFormNameManuallyEdited(true);
+                      }}
+                      placeholder={liveDec.autoName}
+                      className="w-full px-3 py-1.5 rounded-lg bg-white/90 dark:bg-slate-900 border border-emerald-500/30 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+                    <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono text-slate-600 dark:text-slate-300">
+                      <span>{liveDec.icon}</span>
+                      <span
+                        className="w-2.5 h-2.5 rounded-full border border-black/30 inline-block shrink-0"
+                        style={{ backgroundColor: liveDec.colorHex }}
+                      />
+                      <span className="font-bold">{liveDec.marca}</span>
+                      <span>•</span>
+                      <span>{liveDec.etiqueta}</span>
+                      <span>•</span>
+                      <span>{liveDec.grupo}</span>
+                      <span>•</span>
+                      <span>Ref. {liveDec.modelSeq}</span>
+                      <span>•</span>
+                      <span>
+                        {liveDec.colorName} ({liveDec.size})
+                      </span>
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Address & Multi-level Selector */}
               <div className="p-3 rounded-xl bg-mac-blue/10 border border-mac-blue/30 space-y-2.5">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <p className="text-[11px] font-bold text-mac-blue">
                     📍 Endereço Físico (Mesma Torre p/ Todos os Níveis)
                   </p>
@@ -6203,7 +6820,7 @@ export default function App() {
                         playMacSound('pop', soundEnabled);
                       }
                     }}
-                    className="px-2 py-0.5 rounded-lg bg-mac-blue text-white text-[10px] font-semibold"
+                    className="px-2 py-0.5 rounded-lg bg-mac-blue text-white text-[10px] font-semibold shrink-0"
                   >
                     ✨ Sugerir Torre Livre
                   </button>
@@ -6245,7 +6862,7 @@ export default function App() {
                   <label className="block text-[10px] font-bold text-slate-500 dark:text-slate-300 mb-1">
                     🏢 Selecione 1 ou mais Níveis na Torre:
                   </label>
-                  <div className="grid grid-cols-7 gap-1 font-mono text-[10px]">
+                  <div className="grid grid-cols-4 sm:grid-cols-7 gap-1 font-mono text-[10px]">
                     {Array.from(
                       { length: getMaxLevelsForStreet(skuFormRua, skuFormPos) },
                       (_, i) => i + 1
@@ -6326,9 +6943,9 @@ export default function App() {
       {/* MODAL 4: GOOGLE SITES CLOUD SYNC & CLEAN HTML EXPORTER               */}
       {/* ==================================================================== */}
       {showCloudModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4">
           <div className="mac-window mac-sheet w-full max-w-2xl rounded-2xl overflow-hidden shadow-2xl border border-white/20">
-            <div className="px-5 py-3.5 border-b border-black/10 dark:border-white/10 flex items-center justify-between bg-amber-500/15">
+            <div className="px-4 sm:px-5 py-3 border-b border-black/10 dark:border-white/10 flex items-center justify-between bg-amber-500/15">
               <div className="flex items-center space-x-2.5">
                 <span className="text-xl">☁️</span>
                 <div>
@@ -6349,7 +6966,7 @@ export default function App() {
               </button>
             </div>
 
-            <div className="p-5 space-y-4 text-xs max-h-[82vh] overflow-y-auto">
+            <div className="p-3.5 sm:p-5 space-y-4 text-xs max-h-[88dvh] overflow-y-auto">
               {/* Real-Time Google Sheets Cloud Sync */}
               <div className="p-4 rounded-2xl bg-emerald-500/10 border-2 border-emerald-500/40 space-y-3">
                 <div className="flex items-center justify-between">
@@ -6535,11 +7152,11 @@ export default function App() {
       {showSpotlight && (
         <div
           onClick={() => setShowSpotlight(false)}
-          className="fixed inset-0 bg-black/45 backdrop-blur-xs z-50 flex items-start justify-center pt-16 p-4 animate-in fade-in duration-150"
+          className="fixed inset-0 bg-black/45 backdrop-blur-xs z-50 flex items-start justify-center pt-6 sm:pt-16 p-2 sm:p-4 animate-in fade-in duration-150"
         >
           <div
             onClick={e => e.stopPropagation()}
-            className="mac-window mac-sheet w-full max-w-2xl rounded-2xl overflow-hidden shadow-2xl border border-white/25 flex flex-col max-h-[85vh]"
+            className="mac-window mac-sheet w-full max-w-2xl rounded-2xl overflow-hidden shadow-2xl border border-white/25 flex flex-col max-h-[90dvh]"
           >
             {/* Spotlight Header Bar */}
             <div className="px-4 py-3 flex items-center space-x-3 border-b border-black/10 dark:border-white/10 bg-white/40 dark:bg-black/30 backdrop-blur-md">
@@ -6743,7 +7360,7 @@ export default function App() {
       {showAboutModal && (
         <div
           onClick={() => setShowAboutModal(false)}
-          className="fixed inset-0 bg-black/45 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          className="fixed inset-0 bg-black/45 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4"
         >
           <div
             onClick={e => e.stopPropagation()}
@@ -6873,6 +7490,35 @@ export default function App() {
           soundEnabled={soundEnabled}
         />
       </ErrorBoundary>
+
+      {/* ==================================================================== */}
+      {/* MODAL 11: EXPORT ALL ADDRESSES (INCLUSIVE EMPTY SLOTS)               */}
+      {/* ==================================================================== */}
+      <ErrorBoundary fallbackTitle="Falha ao renderizar Exportação de Endereços">
+        <ExportAddressesModal
+          isOpen={showExportAddressesModal}
+          onClose={() => setShowExportAddressesModal(false)}
+          selectedStreet={selectedStreet}
+          addressMap={addressMap}
+          onDownloadCsv={triggerCsvDownload}
+          playMacSound={type => playMacSound(type, soundEnabled)}
+          showToast={showToast}
+        />
+      </ErrorBoundary>
+
+      {/* ==================================================================== */}
+      {/* FLOATING TOUCH / POINTER DRAG GHOST                                  */}
+      {/* ==================================================================== */}
+      {pointerDragGhost && (
+        <div
+          className="fixed z-[90] pointer-events-none px-3 py-1.5 rounded-xl bg-mac-blue text-white shadow-2xl border border-white/30 font-mono text-xs font-bold flex items-center gap-2 -translate-x-1/2 -translate-y-full"
+          style={{ left: pointerDragGhost.x, top: Math.max(24, pointerDragGhost.y - 14) }}
+        >
+          <span>✋</span>
+          <span>{pointerDragGhost.skuCode}</span>
+          <span className="text-[10px] opacity-80">({pointerDragGhost.fromWms})</span>
+        </div>
+      )}
 
       {/* ==================================================================== */}
       {/* TOAST NOTIFICATION                                                   */}
