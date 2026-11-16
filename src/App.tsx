@@ -57,7 +57,11 @@ import {
   loadStoredImportHistory,
   saveStoredImportHistory,
   generateDefaultImportHistory,
-  appendImportHistorySnapshot
+  appendImportHistorySnapshot,
+  loadPendingOfflineSync,
+  loadPendingOfflineSyncFromIDB,
+  savePendingOfflineSync,
+  clearPendingOfflineSync
 } from './utils/storageAndSync';
 import { ReportModal } from './components/ReportModal';
 import { InventoryAuditModal } from './components/InventoryAuditModal';
@@ -67,6 +71,8 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { ExecutiveDashboard } from './components/ExecutiveDashboard';
 import { RelocateModal } from './components/RelocateModal';
 import { ExportAddressesModal } from './components/ExportAddressesModal';
+import { PWAInstallButton, OfflineSyncBanner } from './components/PWAInstallButton';
+import { useOnlineStatus } from './hooks/usePWA';
 import { ImportHistorySnapshot } from './components/OccupancyEvolutionChart';
 
 type WmsPerspective = 'sku' | 'barra';
@@ -292,6 +298,8 @@ export default function App() {
   const [batchPreferEmptyTowers, setBatchPreferEmptyTowers] = useState<boolean>(true);
   const [batchManualPosOverrides, setBatchManualPosOverrides] = useState<Record<string, number>>({});
   const [batchRemovedKeys, setBatchRemovedKeys] = useState<Set<string>>(() => new Set());
+  const [batchForceReallocateKeys, setBatchForceReallocateKeys] = useState<Set<string>>(() => new Set());
+  const [batchIncludeFixedInCsv, setBatchIncludeFixedInCsv] = useState<boolean>(false);
 
   // Deferred Search Queries & Progressive Pagination for Fluid Performance
   const deferredSearchQuery = useDeferredValue(searchQuery);
@@ -349,10 +357,16 @@ export default function App() {
     });
   }, [soundEnabled]);
 
-  // Cloud Sync & HTML Generator State
+  // Cloud Sync, PWA Connectivity & HTML Generator State
   const [cloudSyncUrl, setCloudSyncUrl] = useState<string>(() => getSavedCloudSyncUrl());
   const [cloudStatus, setCloudStatus] = useState<'idle' | 'syncing' | 'ok' | 'error'>('idle');
   const [cloudStatusText, setCloudStatusText] = useState<string>('Nuvem Pronta');
+  const isOnline = useOnlineStatus();
+  const [pendingOfflineSyncCount, setPendingOfflineSyncCount] = useState<number>(
+    () => loadPendingOfflineSync()?.pendingChangesCount || 0
+  );
+  const [isSyncingOfflineQueue, setIsSyncingOfflineQueue] = useState<boolean>(false);
+  const isSyncingOfflineRef = useRef<boolean>(false);
   const [generatedHtmlCode, setGeneratedHtmlCode] = useState<string>('');
   const [isGeneratingHtml, setIsGeneratingHtml] = useState<boolean>(false);
 
@@ -525,7 +539,7 @@ export default function App() {
       applyCsvAndSnapshot(EMBEDDED_SISPLAN_CSV);
     }
 
-    // 2. Async IndexedDB & Cloud Pull
+    // 2. Async IndexedDB & Cloud Pull (protects local offline edits from being overwritten)
     (async () => {
       if (!syncSnap) {
         const idbRaw = await loadFromIndexedDB();
@@ -541,7 +555,42 @@ export default function App() {
         }
       }
 
+      const pendingRecord = await loadPendingOfflineSyncFromIDB();
       const activeUrl = getSavedCloudSyncUrl();
+
+      if (pendingRecord && mounted) {
+        setPendingOfflineSyncCount(pendingRecord.pendingChangesCount);
+        if (navigator.onLine && (activeUrl || pendingRecord.cloudUrl)) {
+          const targetUrl = activeUrl || pendingRecord.cloudUrl || '';
+          setCloudStatus('syncing');
+          setCloudStatusText(`Sincronizando Offline (${pendingRecord.pendingChangesCount})...`);
+          const pushed = await pushStateToCloud(targetUrl, pendingRecord.csv);
+          if (!mounted) return;
+          if (pushed) {
+            clearPendingOfflineSync();
+            setPendingOfflineSyncCount(0);
+            setCloudStatus('ok');
+            setCloudStatusText('Nuvem Conectada');
+          } else {
+            setCloudStatus('error');
+            setCloudStatusText(`Pendente Offline (${pendingRecord.pendingChangesCount})`);
+          }
+          return;
+        } else {
+          setCloudStatus('idle');
+          setCloudStatusText(`Offline (${pendingRecord.pendingChangesCount} pend.)`);
+          return;
+        }
+      }
+
+      if (!navigator.onLine) {
+        if (mounted) {
+          setCloudStatus('idle');
+          setCloudStatusText('Offline • Cache Local');
+        }
+        return;
+      }
+
       if (activeUrl) {
         setCloudStatus('syncing');
         setCloudStatusText('Sincronizando...');
@@ -562,6 +611,113 @@ export default function App() {
       mounted = false;
     };
   }, [buildBaselineFromSkus]);
+
+  // Flush queued offline edits to cloud when connection returns or manual trigger
+  const flushPendingOfflineSync = useCallback(
+    async (manualTrigger = false) => {
+      if (isSyncingOfflineRef.current) return false;
+      if (!navigator.onLine) {
+        if (manualTrigger) {
+          showToast(
+            'Sem Conexão com a Internet',
+            'Suas alterações seguem salvas localmente e serão sincronizadas ao reconectar.',
+            '📶'
+          );
+        }
+        return false;
+      }
+
+      const pendingRecord = await loadPendingOfflineSyncFromIDB();
+      if (!pendingRecord) {
+        setPendingOfflineSyncCount(0);
+        return true;
+      }
+
+      const targetUrl = cloudSyncUrl || pendingRecord.cloudUrl || getSavedCloudSyncUrl();
+      if (!targetUrl) {
+        clearPendingOfflineSync();
+        setPendingOfflineSyncCount(0);
+        return true;
+      }
+
+      isSyncingOfflineRef.current = true;
+      setIsSyncingOfflineQueue(true);
+      setCloudStatus('syncing');
+      setCloudStatusText(`Sincronizando Offline (${pendingRecord.pendingChangesCount})...`);
+
+      try {
+        const ok = await pushStateToCloud(targetUrl, pendingRecord.csv);
+        if (ok) {
+          clearPendingOfflineSync();
+          setPendingOfflineSyncCount(0);
+          setCloudStatus('ok');
+          setCloudStatusText('Salvo na Nuvem');
+          playMacSound('success', soundEnabled);
+          showToast(
+            'Conexão Restabelecida — Dados Sincronizados',
+            `${pendingRecord.pendingChangesCount} alteração(ões) feita(s) offline foram enviadas para a nuvem.`,
+            '☁️'
+          );
+          return true;
+        } else {
+          setCloudStatus('error');
+          setCloudStatusText(`Pendente Offline (${pendingRecord.pendingChangesCount})`);
+          if (manualTrigger) {
+            showToast(
+              'Falha Temporária na Sincronização',
+              'Alterações preservadas na fila offline local. Tentaremos novamente.',
+              '⚠️'
+            );
+          }
+          return false;
+        }
+      } finally {
+        isSyncingOfflineRef.current = false;
+        setIsSyncingOfflineQueue(false);
+      }
+    },
+    [cloudSyncUrl, soundEnabled, showToast]
+  );
+
+  // Auto-sync queued offline changes when browser reconnects + notify PWA offline cache readiness
+  const wasOfflineRef = useRef<boolean>(
+    typeof navigator !== 'undefined' ? !navigator.onLine : false
+  );
+  useEffect(() => {
+    if (!isOnline) {
+      wasOfflineRef.current = true;
+      const pending = loadPendingOfflineSync();
+      setCloudStatus('idle');
+      setCloudStatusText(
+        pending
+          ? `Offline (${pending.pendingChangesCount} pend.)`
+          : 'Offline • Cache Local'
+      );
+      return;
+    }
+
+    const pending = loadPendingOfflineSync();
+    if (pending) {
+      flushPendingOfflineSync(false);
+    } else if (wasOfflineRef.current) {
+      showToast('Conexão Restabelecida', 'Você está online novamente.', '🌐');
+      setCloudStatus(cloudSyncUrl ? 'ok' : 'idle');
+      setCloudStatusText(cloudSyncUrl ? 'Nuvem Conectada' : 'Online');
+    }
+    wasOfflineRef.current = false;
+  }, [isOnline, cloudSyncUrl, flushPendingOfflineSync, showToast]);
+
+  useEffect(() => {
+    const handleOfflineReady = () => {
+      showToast(
+        'Modo Offline Ativado',
+        'App e mapa em cache — acessível e editável mesmo sem internet.',
+        '📲'
+      );
+    };
+    window.addEventListener('wms-pwa-offline-ready', handleOfflineReady);
+    return () => window.removeEventListener('wms-pwa-offline-ready', handleOfflineReady);
+  }, [showToast]);
 
   // Persist changes locally whenever skus, movedSkusRegistry, or transbordoRegistry change
   const persistCurrentState = useCallback(
@@ -591,12 +747,28 @@ export default function App() {
         wmsPerspective
       );
       if (actualPushCloud && cloudSyncUrl) {
-        setCloudStatus('syncing');
-        setCloudStatusText('Salvando Nuvem...');
-        pushStateToCloud(cloudSyncUrl, csvStr).then(ok => {
-          setCloudStatus(ok ? 'ok' : 'error');
-          setCloudStatusText(ok ? 'Salvo na Nuvem' : 'Salvo Localmente');
-        });
+        if (!navigator.onLine) {
+          const rec = savePendingOfflineSync(csvStr, cloudSyncUrl);
+          setPendingOfflineSyncCount(rec.pendingChangesCount);
+          setCloudStatus('idle');
+          setCloudStatusText(`Offline (${rec.pendingChangesCount} pend.)`);
+        } else {
+          setCloudStatus('syncing');
+          setCloudStatusText('Salvando Nuvem...');
+          pushStateToCloud(cloudSyncUrl, csvStr).then(ok => {
+            if (ok) {
+              clearPendingOfflineSync();
+              setPendingOfflineSyncCount(0);
+              setCloudStatus('ok');
+              setCloudStatusText('Salvo na Nuvem');
+            } else {
+              const rec = savePendingOfflineSync(csvStr, cloudSyncUrl);
+              setPendingOfflineSyncCount(rec.pendingChangesCount);
+              setCloudStatus('error');
+              setCloudStatusText(`Pendente (${rec.pendingChangesCount})`);
+            }
+          });
+        }
       }
     },
     [barraItems, rawImportedCsv, wmsPerspective, cloudSyncUrl]
@@ -619,16 +791,34 @@ export default function App() {
       setAutoSaveCountdown(autoSaveIntervalSeconds);
       playMacSound('success', soundEnabled);
       if (cloudSyncUrl) {
-        setCloudStatus('syncing');
-        pushStateToCloud(cloudSyncUrl, csvStr).then(ok => {
-          setCloudStatus(ok ? 'ok' : 'error');
-          setCloudStatusText(ok ? 'Salvo na Nuvem' : 'Salvo Localmente');
-        });
+        if (!navigator.onLine) {
+          const rec = savePendingOfflineSync(csvStr, cloudSyncUrl);
+          setPendingOfflineSyncCount(rec.pendingChangesCount);
+          setCloudStatus('idle');
+          setCloudStatusText(`Offline (${rec.pendingChangesCount} pend.)`);
+        } else {
+          setCloudStatus('syncing');
+          pushStateToCloud(cloudSyncUrl, csvStr).then(ok => {
+            if (ok) {
+              clearPendingOfflineSync();
+              setPendingOfflineSyncCount(0);
+              setCloudStatus('ok');
+              setCloudStatusText('Salvo na Nuvem');
+            } else {
+              const rec = savePendingOfflineSync(csvStr, cloudSyncUrl);
+              setPendingOfflineSyncCount(rec.pendingChangesCount);
+              setCloudStatus('error');
+              setCloudStatusText(`Pendente (${rec.pendingChangesCount})`);
+            }
+          });
+        }
       }
       showToast(
-        'Progresso Salvo com Sucesso',
-        `Gravado às ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} com quantidades de peças preservadas.`,
-        '💾'
+        navigator.onLine ? 'Progresso Salvo com Sucesso' : 'Salvo Offline com Sucesso',
+        navigator.onLine
+          ? `Gravado às ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} com quantidades de peças preservadas.`
+          : `Gravado localmente às ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}. Sincronizará ao reconectar.`,
+        navigator.onLine ? '💾' : '📴'
       );
     } catch (err) {
       console.error('Falha ao salvar progresso:', err);
@@ -677,11 +867,18 @@ export default function App() {
             const now = new Date();
             setLastSavedTimestamp(now);
 
-            if (cloudSyncUrl && (autoRefreshMode === 'save_and_sync' || cloudStatus === 'ok')) {
+            if (cloudSyncUrl && navigator.onLine && (autoRefreshMode === 'save_and_sync' || cloudStatus === 'ok')) {
               setCloudStatus('syncing');
               pushStateToCloud(cloudSyncUrl, csvStr).then(ok => {
-                setCloudStatus(ok ? 'ok' : 'error');
-                setCloudStatusText(ok ? 'Salvo na Nuvem' : 'Salvo Localmente');
+                if (ok) {
+                  clearPendingOfflineSync();
+                  setPendingOfflineSyncCount(0);
+                  setCloudStatus('ok');
+                  setCloudStatusText('Salvo na Nuvem');
+                } else {
+                  setCloudStatus('error');
+                  setCloudStatusText('Salvo Localmente');
+                }
               });
             }
 
@@ -2521,6 +2718,7 @@ export default function App() {
       setBatchTargetRua(target.rua);
       setBatchManualPosOverrides({});
       setBatchRemovedKeys(new Set());
+      setBatchForceReallocateKeys(new Set());
     }
     setSkuFormSubmitAttempted(false);
     setShowSkuModal(true);
@@ -2654,12 +2852,56 @@ export default function App() {
     groupedLocal: string;
     primaryWms: string;
     isCompletelyEmptyTower: boolean;
+    isAlreadyFixed: boolean;
+    fixedRua?: string;
+    fixedPos?: number;
+    fixedPrimaryWms?: string;
+    fixedLocal?: string;
+    fixedDeposito?: string;
+    forceReallocate: boolean;
     error?: string;
   }
 
   const batchQuickPlan = useMemo(() => {
     const parsed = parseQuickSkuListText(batchSkuInputText);
     const activeItems = parsed.items.filter(it => !batchRemovedKeys.has(it.skuKey));
+
+    // 1. Indexa todos os SKUs já alocados em endereços fixos no mapa (RA–RH e AA–AF)
+    const fixedItemsBySkuKey = new Map<string, SkuItem[]>();
+    for (const s of skus) {
+      if (s.isTransbordo || isPulmaoStreet(s.rua)) continue;
+      const key = getCanonicalSkuKey(s.code);
+      const list = fixedItemsBySkuKey.get(key);
+      if (list) list.push(s);
+      else fixedItemsBySkuKey.set(key, [s]);
+    }
+
+    const resolveFixedInfo = (canonicalKey: string) => {
+      const items = fixedItemsBySkuKey.get(canonicalKey);
+      if (!items || items.length === 0) return null;
+
+      // Agrupa por rua+torre para formatar corretamente o endereço fixo cadastrado
+      const towerMap = new Map<string, { rua: string; pos: number; levels: number[] }>();
+      for (const it of items) {
+        const tk = `${it.rua}.${it.pos}`;
+        const existing = towerMap.get(tk);
+        if (existing) {
+          if (!existing.levels.includes(it.nivel)) existing.levels.push(it.nivel);
+        } else {
+          towerMap.set(tk, { rua: it.rua, pos: it.pos, levels: [it.nivel] });
+        }
+      }
+      const groupedParts = Array.from(towerMap.values()).map(t =>
+        formatLevelsToSisplanLocal(t.rua, t.pos, t.levels)
+      );
+      return {
+        rua: items[0].rua,
+        pos: items[0].pos,
+        primaryWms: items[0].wms,
+        deposito: items[0].deposito || '2',
+        groupedLocal: groupedParts.join(' / ') || items[0].rawLocal || items[0].wms
+      };
+    };
 
     const validPositions = getValidPositionsForStreet(batchTargetRua);
     const safeStart = Math.max(1, batchStartPos || 1);
@@ -2695,7 +2937,31 @@ export default function App() {
 
     const assignments: BatchQuickAssignment[] = activeItems.map(item => {
       const dec = decodeSkuPrefix(item.normalizedCode, item.colorCode, item.size);
+      const canonicalKey = getCanonicalSkuKey(item.normalizedCode);
+      const fixedInfo = resolveFixedInfo(canonicalKey);
       const overridePos = batchManualPosOverrides[item.skuKey];
+      const forceReallocate = batchForceReallocateKeys.has(item.skuKey) || Boolean(overridePos);
+
+      // Checa primeiro se o SKU já está em um endereço fixo antes de procurar uma torre livre
+      if (fixedInfo && !forceReallocate) {
+        return {
+          ...item,
+          dec,
+          pos: null,
+          levels: [],
+          groupedLocal: fixedInfo.groupedLocal,
+          primaryWms: fixedInfo.primaryWms,
+          isCompletelyEmptyTower: false,
+          isAlreadyFixed: true,
+          fixedRua: fixedInfo.rua,
+          fixedPos: fixedInfo.pos,
+          fixedPrimaryWms: fixedInfo.primaryWms,
+          fixedLocal: fixedInfo.groupedLocal,
+          fixedDeposito: fixedInfo.deposito,
+          forceReallocate: false
+        };
+      }
+
       let chosenPos: number | null = null;
       let chosenLevels: number[] = [];
       let isEmptyTower = false;
@@ -2759,7 +3025,14 @@ export default function App() {
           levels: chosenLevels,
           groupedLocal: formatLevelsToSisplanLocal(batchTargetRua, chosenPos, chosenLevels),
           primaryWms: formatWmsAddress(batchTargetRua, chosenPos, chosenLevels[0]),
-          isCompletelyEmptyTower: isEmptyTower
+          isCompletelyEmptyTower: isEmptyTower,
+          isAlreadyFixed: Boolean(fixedInfo),
+          fixedRua: fixedInfo?.rua,
+          fixedPos: fixedInfo?.pos,
+          fixedPrimaryWms: fixedInfo?.primaryWms,
+          fixedLocal: fixedInfo?.groupedLocal,
+          fixedDeposito: fixedInfo?.deposito,
+          forceReallocate
         };
       }
 
@@ -2771,43 +3044,69 @@ export default function App() {
         groupedLocal: '',
         primaryWms: '',
         isCompletelyEmptyTower: false,
+        isAlreadyFixed: Boolean(fixedInfo),
+        fixedRua: fixedInfo?.rua,
+        fixedPos: fixedInfo?.pos,
+        fixedPrimaryWms: fixedInfo?.primaryWms,
+        fixedLocal: fixedInfo?.groupedLocal,
+        fixedDeposito: fixedInfo?.deposito,
+        forceReallocate,
         error: `Sem torre livre suficiente na Rua ${batchTargetRua}`
       };
     });
 
+    const newAllocCount = assignments.filter(a => a.pos !== null).length;
+    const alreadyFixedCount = assignments.filter(a => a.isAlreadyFixed && !a.forceReallocate).length;
+
     return {
       assignments,
-      assignableCount: assignments.filter(a => a.pos !== null).length,
+      assignableCount: newAllocCount,
+      alreadyFixedCount,
       duplicateCount: parsed.duplicateCount,
       invalidFragments: parsed.invalidFragments
     };
   }, [
     batchSkuInputText,
     batchRemovedKeys,
+    batchForceReallocateKeys,
     batchTargetRua,
     batchStartPos,
     batchLevelsPerSku,
     batchPreferEmptyTowers,
     batchManualPosOverrides,
+    skus,
     addressMap,
     transbordoRegistry
   ]);
 
   const handleBatchQuickAllocate = (downloadQuickCsv: boolean) => {
-    const assignable = batchQuickPlan.assignments.filter(
+    const assignableNew = batchQuickPlan.assignments.filter(
       a => a.pos !== null && a.levels.length > 0
     );
-    if (assignable.length === 0) {
+    const preservedFixed = batchQuickPlan.assignments.filter(
+      a => a.isAlreadyFixed && !a.forceReallocate && a.fixedLocal
+    );
+
+    const shouldExportFixed = downloadQuickCsv && batchIncludeFixedInCsv && preservedFixed.length > 0;
+    if (assignableNew.length === 0 && !shouldExportFixed) {
       playMacSound('alert', soundEnabled);
-      showToast(
-        'Nenhum SKU Válido para Alocar',
-        'Cole uma lista de SKUs no padrão 8 dígitos - 3 dígitos - Tamanho com torres disponíveis.',
-        '⚠️'
-      );
+      if (preservedFixed.length > 0) {
+        showToast(
+          'SKUs Já Possuem Endereço Fixo',
+          `Todos os ${preservedFixed.length} SKU(s) já estão alocados em endereços fixos no mapa.`,
+          '📌'
+        );
+      } else {
+        showToast(
+          'Nenhum SKU Válido para Alocar',
+          'Cole uma lista de SKUs no padrão 8 dígitos - 3 dígitos - Tamanho com torres disponíveis.',
+          '⚠️'
+        );
+      }
       return;
     }
 
-    const batchKeys = new Set(assignable.map(a => getCanonicalSkuKey(a.normalizedCode)));
+    const batchKeys = new Set(assignableNew.map(a => getCanonicalSkuKey(a.normalizedCode)));
     const filteredExisting = skus.filter(s => !batchKeys.has(getCanonicalSkuKey(s.code)));
 
     const nowTs = Date.now();
@@ -2823,7 +3122,7 @@ export default function App() {
     const newSkuItems: SkuItem[] = [];
     const newQuickEntries: QuickAllocationEntry[] = [];
 
-    assignable.forEach((entry, itemIdx) => {
+    assignableNew.forEach((entry, itemIdx) => {
       const pos = entry.pos!;
       const canonicalKey = getCanonicalSkuKey(entry.normalizedCode);
       entry.levels.forEach((lv, lvIdx) => {
@@ -2867,33 +3166,60 @@ export default function App() {
       });
     });
 
-    const nextSkus = [...newSkuItems, ...filteredExisting];
-    const newEntryKeys = new Set(newQuickEntries.map(e => e.skuKey));
+    if (batchIncludeFixedInCsv) {
+      for (const fx of preservedFixed) {
+        newQuickEntries.push({
+          skuKey: getCanonicalSkuKey(fx.normalizedCode),
+          code: fx.normalizedCode,
+          codigoBase: fx.baseCode,
+          colorCode: fx.colorCode,
+          size: fx.size,
+          deposito: fx.fixedDeposito || depositoFinal,
+          local: fx.fixedLocal!,
+          name: fx.dec.autoName,
+          wms: fx.fixedPrimaryWms || fx.fixedLocal!,
+          qty: qtyFinal,
+          allocatedAt: nowTime
+        });
+      }
+    }
 
-    setSkus(nextSkus);
-    setQuickAllocatedEntries(prev => [
-      ...newQuickEntries,
-      ...prev.filter(e => !newEntryKeys.has(e.skuKey))
-    ]);
+    if (newSkuItems.length > 0) {
+      const nextSkus = [...newSkuItems, ...filteredExisting];
+      setSkus(nextSkus);
+      persistCurrentState(nextSkus, movedSkusRegistry, transbordoRegistry);
+    }
 
-    selectStreet(batchTargetRua);
-    setSelectedAddressKey(newQuickEntries[0].wms);
-    setSelectedSkuId(newSkuItems[0].id);
-    persistCurrentState(nextSkus, movedSkusRegistry, transbordoRegistry);
+    if (newQuickEntries.length > 0) {
+      const newEntryKeys = new Set(newQuickEntries.map(e => e.skuKey));
+      setQuickAllocatedEntries(prev => [
+        ...newQuickEntries,
+        ...prev.filter(e => !newEntryKeys.has(e.skuKey))
+      ]);
+    }
+
+    if (assignableNew.length > 0) {
+      selectStreet(batchTargetRua);
+      setSelectedAddressKey(assignableNew[0].primaryWms);
+      setSelectedSkuId(newSkuItems[0].id);
+      scrollToWmsSlot(assignableNew[0].primaryWms, batchTargetRua, assignableNew[0].pos!);
+    }
 
     setBatchSkuInputText('');
     setBatchManualPosOverrides({});
     setBatchRemovedKeys(new Set());
+    setBatchForceReallocateKeys(new Set());
     setShowSkuModal(false);
-    scrollToWmsSlot(newQuickEntries[0].wms, batchTargetRua, assignable[0].pos!);
 
-    if (downloadQuickCsv) {
+    if (downloadQuickCsv && newQuickEntries.length > 0) {
       exportQuickMovementCsv(newQuickEntries, `lote_${batchTargetRua}`);
-    } else {
+    } else if (assignableNew.length > 0) {
       playMacSound('success', soundEnabled);
       showToast(
-        `${assignable.length} SKUs Alocados na Rua ${batchTargetRua}`,
-        `Adicionados à Fila de Movimentação Rápida (${newQuickEntries[0].local} ...).`,
+        `${assignableNew.length} Novo(s) SKU(s) Alocado(s) na Rua ${batchTargetRua}`,
+        preservedFixed.length > 0
+          ? `${preservedFixed.length} SKU(s) já fixo(s) mantiveram o endereço original.`
+          : `Adicionados à Fila de Movimentação Rápida (${newQuickEntries[0]?.local} ...).`,
         '⚡'
       );
     }
@@ -3846,22 +4172,36 @@ export default function App() {
               <span className="sm:hidden font-mono">💾 2m</span>
             </button>
 
+            <PWAInstallButton />
+
             <button
               type="button"
               onClick={() => setShowCloudModal(true)}
-              className="flex items-center space-x-1.5 px-2 py-0.5 rounded-md bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-700 dark:text-emerald-300 font-semibold transition"
-              title="Sincronização em Tempo Real com Planilha Google / Exportar para Google Sites"
+              className={`flex items-center space-x-1.5 px-2 py-0.5 rounded-md border font-semibold transition ${
+                !isOnline
+                  ? 'bg-amber-500/20 hover:bg-amber-500/30 border-amber-500/40 text-amber-700 dark:text-amber-300'
+                  : 'bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+              }`}
+              title="Sincronização em Tempo Real com Planilha Google / Status Offline & PWA"
             >
               <span
                 className={`w-1.5 h-1.5 rounded-full ${
-                  cloudStatus === 'syncing'
-                    ? 'bg-amber-400 animate-ping'
-                    : cloudStatus === 'error'
-                      ? 'bg-rose-500'
-                      : 'bg-emerald-500'
+                  !isOnline
+                    ? 'bg-amber-500 animate-pulse'
+                    : cloudStatus === 'syncing' || isSyncingOfflineQueue
+                      ? 'bg-amber-400 animate-ping'
+                      : cloudStatus === 'error'
+                        ? 'bg-rose-500'
+                        : 'bg-emerald-500'
                 }`}
               />
-              <span className="text-[10px] hidden sm:inline">{cloudStatusText}</span>
+              <span className="text-[10px] hidden sm:inline">
+                {!isOnline
+                  ? pendingOfflineSyncCount > 0
+                    ? `Offline (${pendingOfflineSyncCount} pend.)`
+                    : 'Offline (Local)'
+                  : cloudStatusText}
+              </span>
             </button>
 
             <button
@@ -7127,6 +7467,7 @@ export default function App() {
                           setBatchSkuInputText('');
                           setBatchManualPosOverrides({});
                           setBatchRemovedKeys(new Set());
+                          setBatchForceReallocateKeys(new Set());
                         }}
                         className="text-[10px] font-bold px-2 py-0.5 rounded bg-black/10 dark:bg-white/10 hover:bg-rose-500 hover:text-white transition"
                       >
@@ -7140,12 +7481,13 @@ export default function App() {
                     onChange={e => {
                       setBatchSkuInputText(e.target.value);
                       setBatchRemovedKeys(new Set());
+                      setBatchForceReallocateKeys(new Set());
                     }}
                     placeholder="Ex: 12180002 - 203 - M 13060013 - 109 - 12 13060059 - 409 - 10 21060002 - 402 - G..."
                     className="w-full px-3 py-2 rounded-xl bg-white/90 dark:bg-slate-900 border border-emerald-500/30 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
                   />
                   <p className="text-[10px] text-slate-500 dark:text-slate-400">
-                    Cada SKU reconhecido no padrão <span className="font-mono font-bold">8 dígitos - 3 dígitos - Tamanho</span> recebe automaticamente uma <strong>Torre Livre Sugerida</strong> na rua selecionada.
+                    O sistema verifica primeiro se cada SKU já possui <strong>endereço fixo no mapa</strong>. Apenas SKUs sem endereço fixo buscam automaticamente uma <strong>Torre Livre Sugerida</strong>.
                   </p>
                 </div>
 
@@ -7214,15 +7556,28 @@ export default function App() {
                       className="w-full px-2 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-black/10 dark:border-white/15 font-mono font-bold text-[11px]"
                     />
                   </div>
-                  <label className="col-span-2 sm:col-span-4 flex items-center gap-2 pt-1 text-[11px] font-medium cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={batchPreferEmptyTowers}
-                      onChange={e => setBatchPreferEmptyTowers(e.target.checked)}
-                      className="rounded border-slate-400 text-mac-blue focus:ring-mac-blue"
-                    />
-                    <span>Priorizar torres 100% vazias antes de usar níveis livres em torres parcialmente ocupadas</span>
-                  </label>
+                  <div className="col-span-2 sm:col-span-4 flex flex-col gap-1 pt-1 text-[11px] font-medium">
+                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={batchPreferEmptyTowers}
+                        onChange={e => setBatchPreferEmptyTowers(e.target.checked)}
+                        className="rounded border-slate-400 text-mac-blue focus:ring-mac-blue"
+                      />
+                      <span>Priorizar torres 100% vazias antes de usar níveis livres em torres parcialmente ocupadas</span>
+                    </label>
+                    {batchQuickPlan.alreadyFixedCount > 0 && (
+                      <label className="flex items-center gap-2 cursor-pointer select-none text-indigo-700 dark:text-indigo-300">
+                        <input
+                          type="checkbox"
+                          checked={batchIncludeFixedInCsv}
+                          onChange={e => setBatchIncludeFixedInCsv(e.target.checked)}
+                          className="rounded border-slate-400 text-indigo-600 focus:ring-indigo-500"
+                        />
+                        <span>Incluir também os {batchQuickPlan.alreadyFixedCount} SKU(s) já fixo(s) no CSV Rápido (mantendo o endereço fixo atual)</span>
+                      </label>
+                    )}
+                  </div>
                 </div>
 
                 {/* Avisos de fragmentos não reconhecidos / duplicados */}
@@ -7239,105 +7594,185 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Tabela Preview SKU -> Torre Livre Sugerida */}
+                {/* Tabela Preview SKU -> Endereço Fixo Existente ou Torre Livre Sugerida */}
                 <div className="rounded-xl border border-black/10 dark:border-white/15 overflow-hidden">
                   <div className="px-3 py-2 bg-black/5 dark:bg-white/5 border-b border-black/10 dark:border-white/10 flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                    <span className="font-bold">
-                      Prévia do Mapeamento ({batchQuickPlan.assignableCount} de {batchQuickPlan.assignments.length} SKU(s) com torre sugerida)
-                    </span>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-bold">
+                        Prévia ({batchQuickPlan.assignments.length} SKU(s)):
+                      </span>
+                      {batchQuickPlan.alreadyFixedCount > 0 && (
+                        <span className="px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 font-mono text-[10px] font-bold">
+                          📌 {batchQuickPlan.alreadyFixedCount} já fixo(s)
+                        </span>
+                      )}
+                      {batchQuickPlan.assignableCount > 0 && (
+                        <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-mono text-[10px] font-bold">
+                          ✨ {batchQuickPlan.assignableCount} torre(s) sugerida(s)
+                        </span>
+                      )}
+                    </div>
                     <span className="font-mono text-[10px] text-slate-500 dark:text-slate-400">
-                      Rua {batchTargetRua} • Col. {isReservedCol35Street(batchTargetRua) ? '35' : '51'}
+                      Destino novos: Rua {batchTargetRua} • Col. {isReservedCol35Street(batchTargetRua) ? '35' : '51'}
                     </span>
                   </div>
 
                   {batchQuickPlan.assignments.length === 0 ? (
                     <div className="p-6 text-center text-slate-400 text-xs">
-                      Cole os códigos SKU acima para visualizar a separação automática e as torres livres sugeridas.
+                      Cole os códigos SKU acima para verificar endereços fixos existentes e sugerir torres livres para os novos SKUs.
                     </div>
                   ) : (
                     <div className="max-h-60 overflow-y-auto divide-y divide-black/5 dark:divide-white/5">
-                      {batchQuickPlan.assignments.map((row, idx) => (
-                        <div
-                          key={row.skuKey}
-                          className="px-3 py-2 flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
-                        >
-                          <div className="min-w-0 flex-1 space-y-0.5">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className="font-mono text-[10px] text-slate-400 w-5 shrink-0">
-                                #{idx + 1}
-                              </span>
-                              <span
-                                className="w-2.5 h-2.5 rounded-full border border-black/25 shrink-0"
-                                style={{ backgroundColor: row.dec.colorHex }}
-                              />
-                              <span className="font-mono font-extrabold text-xs">
-                                {row.normalizedCode}
-                              </span>
+                      {batchQuickPlan.assignments.map((row, idx) => {
+                        const isKeptFixed = row.isAlreadyFixed && !row.forceReallocate;
+                        return (
+                          <div
+                            key={row.skuKey}
+                            className={`px-3 py-2 flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 transition ${
+                              isKeptFixed
+                                ? 'bg-indigo-500/[0.04] hover:bg-indigo-500/[0.08]'
+                                : 'hover:bg-black/[0.02] dark:hover:bg-white/[0.03]'
+                            }`}
+                          >
+                            <div className="min-w-0 flex-1 space-y-0.5">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="font-mono text-[10px] text-slate-400 w-5 shrink-0">
+                                  #{idx + 1}
+                                </span>
+                                <span
+                                  className="w-2.5 h-2.5 rounded-full border border-black/25 shrink-0"
+                                  style={{ backgroundColor: row.dec.colorHex }}
+                                />
+                                <span className="font-mono font-extrabold text-xs">
+                                  {row.normalizedCode}
+                                </span>
+                                {isKeptFixed && (
+                                  <span className="px-1.5 py-0.2 rounded bg-indigo-500/20 text-indigo-700 dark:text-indigo-200 font-bold text-[9px]">
+                                    ENDEREÇO FIXO
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[10px] text-slate-500 dark:text-slate-400 truncate pl-6">
+                                {row.dec.icon} {row.dec.autoName}
+                              </p>
                             </div>
-                            <p className="text-[10px] text-slate-500 dark:text-slate-400 truncate pl-6">
-                              {row.dec.icon} {row.dec.autoName}
-                            </p>
-                          </div>
 
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            <span className="text-slate-400 text-[11px]">➔</span>
-                            {row.pos !== null ? (
-                              <span
-                                className={`px-2 py-0.5 rounded-lg font-mono text-[11px] font-bold border ${
-                                  row.isCompletelyEmptyTower
-                                    ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
-                                    : 'bg-mac-blue/15 text-mac-blue border-mac-blue/30'
-                                }`}
-                                title={
-                                  row.isCompletelyEmptyTower
-                                    ? 'Torre 100% vazia sugerida'
-                                    : 'Torre parcialmente ocupada com níveis livres'
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <span className="text-slate-400 text-[11px]">➔</span>
+                              {isKeptFixed ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (row.fixedRua && row.fixedPrimaryWms && row.fixedPos) {
+                                        selectStreet(row.fixedRua);
+                                        setSelectedAddressKey(row.fixedPrimaryWms);
+                                        scrollToWmsSlot(row.fixedPrimaryWms, row.fixedRua, row.fixedPos);
+                                      }
+                                    }}
+                                    className="px-2 py-0.5 rounded-lg font-mono text-[11px] font-bold border bg-indigo-500/15 hover:bg-indigo-600 text-indigo-700 dark:text-indigo-200 hover:text-white border-indigo-500/35 transition"
+                                    title="SKU já alocado neste endereço fixo. Clique para localizar no mapa."
+                                  >
+                                    📌 {row.fixedLocal}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setBatchForceReallocateKeys(prev => {
+                                        const next = new Set(prev);
+                                        next.add(row.skuKey);
+                                        return next;
+                                      })
+                                    }
+                                    className="px-1.5 py-0.5 rounded-md bg-black/5 dark:bg-white/10 hover:bg-amber-500 hover:text-slate-950 text-[10px] font-bold transition"
+                                    title="Ignorar endereço fixo atual e sugerir uma nova torre livre"
+                                  >
+                                    🔄 Realocar
+                                  </button>
+                                </>
+                              ) : (
+                                <>
+                                  {row.pos !== null ? (
+                                    <span
+                                      className={`px-2 py-0.5 rounded-lg font-mono text-[11px] font-bold border ${
+                                        row.isCompletelyEmptyTower
+                                          ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+                                          : 'bg-mac-blue/15 text-mac-blue border-mac-blue/30'
+                                      }`}
+                                      title={
+                                        row.isCompletelyEmptyTower
+                                          ? 'Torre 100% vazia sugerida'
+                                          : 'Torre parcialmente ocupada com níveis livres'
+                                      }
+                                    >
+                                      {row.groupedLocal}
+                                    </span>
+                                  ) : (
+                                    <span className="px-2 py-0.5 rounded-lg bg-rose-500/15 text-rose-600 dark:text-rose-300 font-bold text-[10px] border border-rose-500/30">
+                                      {row.error || 'Sem vaga'}
+                                    </span>
+                                  )}
+                                  {row.isAlreadyFixed && row.forceReallocate && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setBatchForceReallocateKeys(prev => {
+                                          const next = new Set(prev);
+                                          next.delete(row.skuKey);
+                                          return next;
+                                        });
+                                        setBatchManualPosOverrides(prev => {
+                                          const next = { ...prev };
+                                          delete next[row.skuKey];
+                                          return next;
+                                        });
+                                      }}
+                                      className="px-1.5 py-0.5 rounded-md bg-indigo-500/15 hover:bg-indigo-600 text-indigo-700 dark:text-indigo-200 hover:text-white text-[10px] font-bold transition"
+                                      title={`Voltar a usar o endereço fixo existente (${row.fixedLocal})`}
+                                    >
+                                      ↩ Fixo
+                                    </button>
+                                  )}
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    max={175}
+                                    value={batchManualPosOverrides[row.skuKey] ?? row.pos ?? ''}
+                                    onChange={e => {
+                                      const val = parseInt(e.target.value, 10);
+                                      setBatchManualPosOverrides(prev => {
+                                        const next = { ...prev };
+                                        if (!val || Number.isNaN(val)) {
+                                          delete next[row.skuKey];
+                                        } else {
+                                          next[row.skuKey] = val;
+                                        }
+                                        return next;
+                                      });
+                                    }}
+                                    title="Editar número da torre manualmente (opcional)"
+                                    className="w-14 px-1.5 py-0.5 rounded-md bg-black/5 dark:bg-white/10 border border-black/10 dark:border-white/15 font-mono text-[10px] text-center font-bold"
+                                  />
+                                </>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setBatchRemovedKeys(prev => {
+                                    const next = new Set(prev);
+                                    next.add(row.skuKey);
+                                    return next;
+                                  })
                                 }
+                                className="p-1 rounded-md text-slate-400 hover:text-rose-500 hover:bg-rose-500/10 transition"
+                                title="Remover este SKU da importação rápida"
                               >
-                                {row.groupedLocal}
-                              </span>
-                            ) : (
-                              <span className="px-2 py-0.5 rounded-lg bg-rose-500/15 text-rose-600 dark:text-rose-300 font-bold text-[10px] border border-rose-500/30">
-                                {row.error || 'Sem vaga'}
-                              </span>
-                            )}
-                            <input
-                              type="number"
-                              min={1}
-                              max={175}
-                              value={batchManualPosOverrides[row.skuKey] ?? row.pos ?? ''}
-                              onChange={e => {
-                                const val = parseInt(e.target.value, 10);
-                                setBatchManualPosOverrides(prev => {
-                                  const next = { ...prev };
-                                  if (!val || Number.isNaN(val)) {
-                                    delete next[row.skuKey];
-                                  } else {
-                                    next[row.skuKey] = val;
-                                  }
-                                  return next;
-                                });
-                              }}
-                              title="Editar número da torre manualmente (opcional)"
-                              className="w-14 px-1.5 py-0.5 rounded-md bg-black/5 dark:bg-white/10 border border-black/10 dark:border-white/15 font-mono text-[10px] text-center font-bold"
-                            />
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setBatchRemovedKeys(prev => {
-                                  const next = new Set(prev);
-                                  next.add(row.skuKey);
-                                  return next;
-                                })
-                              }
-                              className="p-1 rounded-md text-slate-400 hover:text-rose-500 hover:bg-rose-500/10 transition"
-                              title="Remover este SKU da importação rápida"
-                            >
-                              ✕
-                            </button>
+                                ✕
+                              </button>
+                            </div>
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -7367,33 +7802,44 @@ export default function App() {
                     </div>
                   )}
 
-                  <div className="flex flex-wrap justify-end gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setShowSkuModal(false)}
-                      className="px-4 py-2 rounded-xl bg-black/5 dark:bg-white/10 font-medium"
-                    >
-                      Cancelar
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleBatchQuickAllocate(true)}
-                      disabled={batchQuickPlan.assignableCount === 0}
-                      className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-bold shadow-lg transition flex items-center gap-1.5"
-                      title="Aloca todos os SKUs da lista nas torres livres sugeridas e baixa o CSV no formato SISPLAN"
-                    >
-                      <span>⚡</span>
-                      <span>Alocar Lista + Baixar CSV Rápido ({batchQuickPlan.assignableCount})</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleBatchQuickAllocate(false)}
-                      disabled={batchQuickPlan.assignableCount === 0}
-                      className="px-5 py-2 rounded-xl bg-mac-blue hover:bg-blue-500 disabled:opacity-40 text-white font-semibold shadow-lg transition"
-                    >
-                      Alocar Lista no Mapa
-                    </button>
-                  </div>
+                  {(() => {
+                    const csvTargetCount =
+                      batchQuickPlan.assignableCount +
+                      (batchIncludeFixedInCsv ? batchQuickPlan.alreadyFixedCount : 0);
+                    return (
+                      <div className="flex flex-wrap justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setShowSkuModal(false)}
+                          className="px-4 py-2 rounded-xl bg-black/5 dark:bg-white/10 font-medium"
+                        >
+                          Cancelar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleBatchQuickAllocate(true)}
+                          disabled={csvTargetCount === 0}
+                          className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-bold shadow-lg transition flex items-center gap-1.5"
+                          title="Aloca os novos SKUs nas torres livres sugeridas e baixa o CSV no formato SISPLAN (CODIGO;COR;TAMANHO;DEPOSITO;LOCAL)"
+                        >
+                          <span>⚡</span>
+                          <span>
+                            {batchQuickPlan.assignableCount > 0
+                              ? `Alocar Lista + Baixar CSV Rápido (${csvTargetCount})`
+                              : `Baixar CSV Endereços Fixos (${csvTargetCount})`}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleBatchQuickAllocate(false)}
+                          disabled={batchQuickPlan.assignableCount === 0}
+                          className="px-5 py-2 rounded-xl bg-mac-blue hover:bg-blue-500 disabled:opacity-40 text-white font-semibold shadow-lg transition"
+                        >
+                          Alocar Novos no Mapa ({batchQuickPlan.assignableCount})
+                        </button>
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             ) : (
@@ -7903,18 +8349,38 @@ export default function App() {
                   <button
                     type="button"
                     onClick={async () => {
+                      const csv = buildSisplanCsvString(skus, transbordoRegistry);
+                      if (!navigator.onLine) {
+                        const rec = savePendingOfflineSync(csv, cloudSyncUrl);
+                        setPendingOfflineSyncCount(rec.pendingChangesCount);
+                        setCloudStatus('idle');
+                        setCloudStatusText(`Offline (${rec.pendingChangesCount} pend.)`);
+                        playMacSound('alert', soundEnabled);
+                        showToast(
+                          'Sem Conexão — Salvo na Fila Offline',
+                          'Os dados permanecem salvos no dispositivo e serão enviados automaticamente ao reconectar.',
+                          '📴'
+                        );
+                        return;
+                      }
                       setCloudStatus('syncing');
                       setCloudStatusText('Enviando...');
-                      const csv = buildSisplanCsvString(skus, transbordoRegistry);
                       const ok = await pushStateToCloud(cloudSyncUrl, csv);
+                      if (ok) {
+                        clearPendingOfflineSync();
+                        setPendingOfflineSyncCount(0);
+                      } else {
+                        const rec = savePendingOfflineSync(csv, cloudSyncUrl);
+                        setPendingOfflineSyncCount(rec.pendingChangesCount);
+                      }
                       setCloudStatus(ok ? 'ok' : 'error');
-                      setCloudStatusText(ok ? 'Sincronizado!' : 'Falha na Rede');
+                      setCloudStatusText(ok ? 'Sincronizado!' : 'Falha na Rede (Na Fila)');
                       playMacSound(ok ? 'success' : 'alert', soundEnabled);
                       showToast(
                         ok ? 'Nuvem Google Atualizada!' : 'Aviso de Conexão',
                         ok
                           ? 'Todos os dados foram gravados na Planilha Google.'
-                          : 'Salvo no navegador local.',
+                          : 'Salvo localmente na fila de sincronização automática.',
                         '☁️'
                       );
                     }}
@@ -7925,6 +8391,14 @@ export default function App() {
                   <button
                     type="button"
                     onClick={async () => {
+                      if (!navigator.onLine) {
+                        showToast(
+                          'Sem Conexão com a Internet',
+                          'Não é possível baixar da nuvem estando offline. Seus dados locais estão ativos.',
+                          '📶'
+                        );
+                        return;
+                      }
                       setCloudStatus('syncing');
                       setCloudStatusText('Baixando...');
                       const data = await pullStateFromCloud(cloudSyncUrl);
@@ -7933,6 +8407,8 @@ export default function App() {
                         setSkus(res.skus);
                         setBarraItems(res.barraItems);
                         setTransbordoRegistry(res.transbordoRegistry);
+                        clearPendingOfflineSync();
+                        setPendingOfflineSyncCount(0);
                         setCloudStatus('ok');
                         setCloudStatusText('Atualizado da Nuvem');
                         playMacSound('success', soundEnabled);
@@ -8427,6 +8903,16 @@ export default function App() {
           <span className="text-[10px] opacity-80">({pointerDragGhost.fromWms})</span>
         </div>
       )}
+
+      {/* ==================================================================== */}
+      {/* FLOATING PWA OFFLINE & RECONNECT SYNC BANNER                         */}
+      {/* ==================================================================== */}
+      <OfflineSyncBanner
+        isOnline={isOnline}
+        pendingCount={pendingOfflineSyncCount}
+        isSyncing={isSyncingOfflineQueue}
+        onSyncNow={() => flushPendingOfflineSync(true)}
+      />
 
       {/* ==================================================================== */}
       {/* TOAST NOTIFICATION                                                   */}

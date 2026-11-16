@@ -1005,6 +1005,139 @@ export function loadLocalWmsSnapshotSync(): WmsPersistedSnapshot | null {
 }
 
 // ============================================================================
+// OFFLINE SYNC QUEUE (LOCAL STORAGE + INDEXEDDB FOR AUTO-SYNC ON RECONNECT)
+// ============================================================================
+const OFFLINE_SYNC_QUEUE_KEY = 'estoque_os_pending_offline_sync_v1';
+const IDB_SYNC_QUEUE_KEY = 'pending_offline_sync_record';
+
+export interface PendingOfflineSyncRecord {
+  csv: string;
+  updatedAt: string;
+  pendingChangesCount: number;
+  cloudUrl?: string;
+}
+
+function saveQueueToIndexedDB(payloadStr: string | null) {
+  try {
+    if (!window.indexedDB) return;
+    const req = window.indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = e => {
+      const db = (e.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.createObjectStore(IDB_STORE);
+      }
+    };
+    req.onsuccess = e => {
+      try {
+        const db = (e.target as IDBOpenDBRequest).result;
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        const store = tx.objectStore(IDB_STORE);
+        if (payloadStr === null) {
+          store.delete(IDB_SYNC_QUEUE_KEY);
+        } else {
+          store.put(payloadStr, IDB_SYNC_QUEUE_KEY);
+        }
+      } catch {
+        // ignore
+      }
+    };
+  } catch {
+    // ignore
+  }
+}
+
+export function loadPendingOfflineSync(): PendingOfflineSyncRecord | null {
+  try {
+    const raw = localStorage.getItem(OFFLINE_SYNC_QUEUE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.csv === 'string') {
+      return {
+        csv: parsed.csv,
+        updatedAt: parsed.updatedAt || new Date().toISOString(),
+        pendingChangesCount: Math.max(1, Number(parsed.pendingChangesCount) || 1),
+        cloudUrl: parsed.cloudUrl
+      };
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+export function loadPendingOfflineSyncFromIDB(): Promise<PendingOfflineSyncRecord | null> {
+  return new Promise(resolve => {
+    try {
+      if (!window.indexedDB) return resolve(loadPendingOfflineSync());
+      const req = window.indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = e => {
+        const db = (e.target as IDBOpenDBRequest).result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE);
+        }
+      };
+      req.onsuccess = e => {
+        try {
+          const db = (e.target as IDBOpenDBRequest).result;
+          const tx = db.transaction(IDB_STORE, 'readonly');
+          const getReq = tx.objectStore(IDB_STORE).get(IDB_SYNC_QUEUE_KEY);
+          getReq.onsuccess = () => {
+            try {
+              const raw = getReq.result as string | undefined;
+              if (raw) {
+                const parsed = JSON.parse(raw);
+                if (parsed && typeof parsed.csv === 'string') {
+                  return resolve(parsed as PendingOfflineSyncRecord);
+                }
+              }
+            } catch {
+              // fallback
+            }
+            resolve(loadPendingOfflineSync());
+          };
+          getReq.onerror = () => resolve(loadPendingOfflineSync());
+        } catch {
+          resolve(loadPendingOfflineSync());
+        }
+      };
+      req.onerror = () => resolve(loadPendingOfflineSync());
+    } catch {
+      resolve(loadPendingOfflineSync());
+    }
+  });
+}
+
+export function savePendingOfflineSync(
+  csvStr: string,
+  cloudUrl?: string
+): PendingOfflineSyncRecord {
+  const existing = loadPendingOfflineSync();
+  const nextRecord: PendingOfflineSyncRecord = {
+    csv: csvStr,
+    updatedAt: new Date().toISOString(),
+    pendingChangesCount: (existing?.pendingChangesCount || 0) + 1,
+    cloudUrl
+  };
+  const str = JSON.stringify(nextRecord);
+  try {
+    localStorage.setItem(OFFLINE_SYNC_QUEUE_KEY, str);
+  } catch {
+    // ignore
+  }
+  saveQueueToIndexedDB(str);
+  return nextRecord;
+}
+
+export function clearPendingOfflineSync() {
+  try {
+    localStorage.removeItem(OFFLINE_SYNC_QUEUE_KEY);
+  } catch {
+    // ignore
+  }
+  saveQueueToIndexedDB(null);
+}
+
+// ============================================================================
 // GOOGLE APPS SCRIPT CLOUD SYNC (FETCH + JSONP FALLBACK FOR GOOGLE SITES)
 // ============================================================================
 export function getSavedCloudSyncUrl(): string {
