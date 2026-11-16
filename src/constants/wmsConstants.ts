@@ -624,6 +624,206 @@ export function parseFullSkuString(rawCode: string): ParsedFullSku {
   };
 }
 
+export interface SkuNamingValidationResult {
+  isValid: boolean;
+  isBaseValid: boolean;
+  isColorValid: boolean;
+  isSizeValid: boolean;
+  normalizedCode: string;
+  baseCode: string;
+  colorCode: string;
+  size: string;
+  errors: string[];
+  warnings: string[];
+}
+
+/**
+ * Valida o SKU informado no formulário contra o padrão oficial de nomenclatura:
+ * - Código Base: exatamente 8 dígitos numéricos (Marca [1] + Etiqueta [1] + Grupo [2] + Sequência [4])
+ * - Cor: 3 dígitos numéricos (ex: 102, 201, 407)
+ * - Tamanho: 1 a 4 caracteres alfanuméricos (ex: PP, P, M, G, GG, EGG, U, 36..48)
+ */
+export function validateSkuNamingPattern(rawCode: string): SkuNamingValidationResult {
+  const trimmed = String(rawCode || '').trim().toUpperCase();
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!trimmed) {
+    return {
+      isValid: false,
+      isBaseValid: false,
+      isColorValid: false,
+      isSizeValid: false,
+      normalizedCode: '',
+      baseCode: '',
+      colorCode: '',
+      size: '',
+      errors: ['Informe o SKU completo no padrão CODIGO (8 dígitos) - COR (3 dígitos) - TAMANHO.'],
+      warnings
+    };
+  }
+
+  const parts = trimmed.split(/\s*[-;]\s*|\s+/).filter(Boolean);
+  let rawBase = parts[0] || '';
+  let rawColor = parts[1] || '';
+  let rawSize = parts.slice(2).join('').trim();
+
+  // Suporta entrada compacta sem separadores (ex: 11060127102M ou 11060127102GG)
+  if (parts.length === 1) {
+    const compactMatch = rawBase.match(/^(\d{8})(\d{3})([A-Z0-9]{1,4})?$/);
+    if (compactMatch) {
+      rawBase = compactMatch[1];
+      rawColor = compactMatch[2];
+      rawSize = compactMatch[3] || '';
+    }
+  }
+
+  const isBaseValid = /^\d{8}$/.test(rawBase);
+  const isColorValid = /^\d{3}$/.test(rawColor);
+  const isSizeValid = /^[A-Z0-9]{1,4}$/.test(rawSize);
+
+  if (!isBaseValid) {
+    const onlyDigitsLen = rawBase.replace(/\D/g, '').length;
+    if (/[^0-9]/.test(rawBase)) {
+      errors.push(
+        `Código base "${rawBase}" inválido: deve conter apenas números com exatamente 8 dígitos (ex: 11060127).`
+      );
+    } else {
+      errors.push(
+        `Código base "${rawBase}" deve ter exatamente 8 dígitos numéricos (atual: ${onlyDigitsLen} dígito${onlyDigitsLen === 1 ? '' : 's'}).`
+      );
+    }
+  }
+
+  if (!rawColor) {
+    errors.push('Código da cor ausente: informe 3 dígitos numéricos (ex: 11060127 - 102 - M).');
+  } else if (!isColorValid) {
+    errors.push(
+      `Código da cor "${rawColor}" inválido: deve conter exatamente 3 dígitos numéricos (ex: 102, 201).`
+    );
+  }
+
+  if (!rawSize) {
+    errors.push('Tamanho ausente: informe o tamanho ao final do SKU (ex: P, M, G, GG, U, 40).');
+  } else if (!isSizeValid) {
+    errors.push(
+      `Tamanho "${rawSize}" inválido: utilize de 1 a 4 caracteres alfanuméricos (ex: P, M, G, GG, EGG, 42).`
+    );
+  }
+
+  if (isBaseValid) {
+    const dMarca = rawBase.charAt(0);
+    const dEtiqueta = rawBase.charAt(1);
+    const dGrupo = rawBase.substring(2, 4);
+    if (!AERO_BRANDS[dMarca]) {
+      warnings.push(`1º dígito (Marca "${dMarca}") fora da tabela padrão (1–3).`);
+    }
+    if (!AERO_LABELS[dEtiqueta]) {
+      warnings.push(`2º dígito (Etiqueta "${dEtiqueta}") fora da tabela padrão (1–4).`);
+    }
+    if (!AERO_GROUPS[dGrupo] && !AERO_GROUPS[String(parseInt(dGrupo, 10))]) {
+      warnings.push(`3º–4º dígitos (Grupo "${dGrupo}") fora da tabela padrão Aero.`);
+    }
+  }
+
+  if (isColorValid && !OFFICIAL_COLORS[rawColor]) {
+    warnings.push(`Cor "${rawColor}" não consta na paleta oficial pré-cadastrada.`);
+  }
+
+  const isValid = isBaseValid && isColorValid && isSizeValid && errors.length === 0;
+
+  return {
+    isValid,
+    isBaseValid,
+    isColorValid,
+    isSizeValid,
+    normalizedCode: isValid ? `${rawBase} - ${rawColor} - ${rawSize}` : trimmed,
+    baseCode: rawBase,
+    colorCode: rawColor,
+    size: rawSize,
+    errors,
+    warnings
+  };
+}
+
+export interface ParsedQuickListEntry {
+  skuKey: string;
+  normalizedCode: string;
+  baseCode: string;
+  colorCode: string;
+  size: string;
+  warnings: string[];
+}
+
+export interface ParsedQuickSkuListResult {
+  items: ParsedQuickListEntry[];
+  duplicateCount: number;
+  invalidFragments: string[];
+}
+
+/**
+ * Extrai e valida múltiplos SKUs a partir de texto livre colado (em uma linha ou várias linhas).
+ * Suporta formatos: "12180002 - 203 - M", "13060013 - 109 -12", "12180002;203;M" ou compacto "12180002203M".
+ */
+export function parseQuickSkuListText(rawText: string): ParsedQuickSkuListResult {
+  const upper = String(rawText || '').toUpperCase();
+  if (!upper.trim()) {
+    return { items: [], duplicateCount: 0, invalidFragments: [] };
+  }
+
+  const pattern =
+    /\b(\d{8})\s*[-;]\s*(\d{3})\s*[-;]\s*([A-Z0-9]{1,4})\b|\b(\d{8})(\d{3})([A-Z0-9]{1,4})\b/g;
+
+  const items: ParsedQuickListEntry[] = [];
+  const seenKeys = new Set<string>();
+  let duplicateCount = 0;
+
+  let residual = '';
+  let lastIdx = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(upper)) !== null) {
+    residual += upper.slice(lastIdx, match.index) + ' ';
+    lastIdx = match.index + match[0].length;
+
+    const baseCode = match[1] || match[4] || '';
+    const colorCode = match[2] || match[5] || '';
+    const size = match[3] || match[6] || '';
+    const candidate = `${baseCode} - ${colorCode} - ${size}`;
+    const validation = validateSkuNamingPattern(candidate);
+
+    if (validation.isValid) {
+      const skuKey = `${validation.baseCode}|${validation.colorCode}|${validation.size}`;
+      if (seenKeys.has(skuKey)) {
+        duplicateCount++;
+        continue;
+      }
+      seenKeys.add(skuKey);
+      items.push({
+        skuKey,
+        normalizedCode: validation.normalizedCode,
+        baseCode: validation.baseCode,
+        colorCode: validation.colorCode,
+        size: validation.size,
+        warnings: validation.warnings
+      });
+    }
+  }
+  residual += upper.slice(lastIdx);
+
+  // Detecta fragmentos residuais não reconhecidos (ex: código base com 7 ou 9 dígitos)
+  const invalidFragments = residual
+    .split(/[\r\n,;|\t]+/)
+    .map(chunk => chunk.replace(/^[\s•\-=>]+|[\s•\-=>]+$/g, '').trim())
+    .filter(chunk => chunk.length > 0 && /[A-Z0-9]/.test(chunk));
+
+  return {
+    items,
+    duplicateCount,
+    invalidFragments
+  };
+}
+
 export function decodeSkuPrefix(rawCode: string, explicitColor = '', explicitSize = '') {
   const parsed = parseFullSkuString(rawCode);
 

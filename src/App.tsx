@@ -28,6 +28,10 @@ import {
   formatCanonicalSkuDisplay,
   decodeSkuPrefix,
   parseFullSkuString,
+  validateSkuNamingPattern,
+  SkuNamingValidationResult,
+  parseQuickSkuListText,
+  ParsedQuickListEntry,
   normalizeSearchText,
   getHeatmapColorInfo,
   HeatmapColorInfo
@@ -76,6 +80,20 @@ type OccupancyFilter =
   | 'OUTSIDE_LOCAL'
   | 'LOW_STOCK_LT5'
   | 'TRANSBORDO';
+
+interface QuickAllocationEntry {
+  skuKey: string;
+  code: string;
+  codigoBase: string;
+  colorCode: string;
+  size: string;
+  deposito: string;
+  local: string;
+  name: string;
+  wms: string;
+  qty: number;
+  allocatedAt: string;
+}
 
 interface PhysicalSlotMeta {
   rua: string;
@@ -264,10 +282,36 @@ export default function App() {
   const [skuFormSelectedLevels, setSkuFormSelectedLevels] = useState<number[]>([1]);
   const [skuFormQty, setSkuFormQty] = useState<number>(50);
   const [skuFormColecao, setSkuFormColecao] = useState<string>('35');
+  const [skuFormSubmitAttempted, setSkuFormSubmitAttempted] = useState<boolean>(false);
+  const [skuModalTab, setSkuModalTab] = useState<'single' | 'batch'>('single');
+  const [batchSkuInputText, setBatchSkuInputText] = useState<string>('');
+  const [batchTargetRua, setBatchTargetRua] = useState<string>('RG');
+  const [batchStartPos, setBatchStartPos] = useState<number>(1);
+  const [batchLevelsPerSku, setBatchLevelsPerSku] = useState<number>(1);
+  const [batchDefaultQty, setBatchDefaultQty] = useState<number>(50);
+  const [batchPreferEmptyTowers, setBatchPreferEmptyTowers] = useState<boolean>(true);
+  const [batchManualPosOverrides, setBatchManualPosOverrides] = useState<Record<string, number>>({});
+  const [batchRemovedKeys, setBatchRemovedKeys] = useState<Set<string>>(() => new Set());
 
   // Deferred Search Queries & Progressive Pagination for Fluid Performance
   const deferredSearchQuery = useDeferredValue(searchQuery);
   const [visibleSlotsLimit, setVisibleSlotsLimit] = useState<number>(180);
+
+  // Quick Movement CSV Queue (Newly allocated SKUs ready for fast SISPLAN import)
+  const [quickAllocatedEntries, setQuickAllocatedEntries] = useState<QuickAllocationEntry[]>(() => {
+    try {
+      const saved = localStorage.getItem('estoque_quick_allocations_v1');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('estoque_quick_allocations_v1', JSON.stringify(quickAllocatedEntries));
+    } catch {}
+  }, [quickAllocatedEntries]);
 
   // Relocate Modal State
   const [relocateSearchInput, setRelocateSearchInput] = useState<string>('');
@@ -2222,6 +2266,49 @@ export default function App() {
     );
   };
 
+  const exportQuickMovementCsv = useCallback(
+    (overrideEntries?: QuickAllocationEntry[], labelSuffix?: string) => {
+      const entries = overrideEntries || quickAllocatedEntries;
+      if (entries.length === 0) {
+        playMacSound('alert', soundEnabled);
+        showToast(
+          'Nenhuma Alocação Rápida na Fila',
+          'Aloque um novo SKU no mapa para gerar o CSV de movimentação rápida (SISPLAN).',
+          '⚠️'
+        );
+        return;
+      }
+
+      const lines = ['CODIGO;COR;TAMANHO;DEPOSITO;LOCAL'];
+      for (const e of entries) {
+        lines.push(`${e.codigoBase};${e.colorCode};${e.size};${e.deposito};${e.local}`);
+      }
+      const dateStr = new Date().toISOString().slice(0, 10);
+      const safeTag = labelSuffix ? `_${labelSuffix.replace(/[^A-Z0-9_-]/gi, '')}` : '';
+      triggerCsvDownload(
+        lines.join('\n') + '\n',
+        `sisplan_movimentacao_rapida${safeTag}_${dateStr}.csv`
+      );
+      playMacSound('success', soundEnabled);
+      showToast(
+        'CSV Movimentação Rápida Baixado',
+        `${entries.length} ${entries.length === 1 ? 'item exportado' : 'itens exportados'} no formato SISPLAN (CODIGO;COR;TAMANHO;DEPOSITO;LOCAL).`,
+        '⚡'
+      );
+    },
+    [quickAllocatedEntries, soundEnabled, showToast]
+  );
+
+  const clearQuickAllocationQueue = useCallback(() => {
+    setQuickAllocatedEntries([]);
+    playMacSound('pop', soundEnabled);
+    showToast(
+      'Fila de Movimentação Rápida Limpa',
+      'Todos os registros pendentes foram removidos e a contagem foi zerada.',
+      '🧹'
+    );
+  }, [soundEnabled, showToast]);
+
   const exportTransbordoCsv = () => {
     const list = Object.values(transbordoRegistry);
     if (list.length === 0) {
@@ -2382,7 +2469,11 @@ export default function App() {
     }
   };
 
-  const openAllocateOrEditSkuModal = (editItem?: SkuItem | null, defaultWms?: string) => {
+  const openAllocateOrEditSkuModal = (
+    editItem?: SkuItem | null,
+    defaultWms?: string,
+    initialTab: 'single' | 'batch' = 'single'
+  ) => {
     if (editItem) {
       const dec = decodeSkuPrefix(editItem.code);
       const multi = getSkuMultiLevelInfo(editItem);
@@ -2402,6 +2493,7 @@ export default function App() {
       setSkuFormSelectedLevels(multi.levels);
       setSkuFormQty(editItem.qty || 50);
       setSkuFormColecao(editItem.colecao || (isReservedCol35Street(editItem.rua) ? '35' : '51'));
+      setSkuModalTab('single');
     } else {
       const target = parseAddressString(defaultWms || selectedAddressKey) || {
         rua: selectedStreet,
@@ -2425,8 +2517,386 @@ export default function App() {
       setSkuFormPos(target.pos);
       setSkuFormSelectedLevels([target.nivel]);
       setSkuFormColecao(isReservedCol35Street(target.rua) ? '35' : '51');
+      setSkuModalTab(initialTab);
+      setBatchTargetRua(target.rua);
+      setBatchManualPosOverrides({});
+      setBatchRemovedKeys(new Set());
     }
+    setSkuFormSubmitAttempted(false);
     setShowSkuModal(true);
+  };
+
+  const validateSkuAllocationForm = useCallback((): SkuNamingValidationResult & {
+    streetValid: boolean;
+    qtyValid: boolean;
+    levelsValid: boolean;
+  } => {
+    const naming = validateSkuNamingPattern(skuFormCode);
+    const errors = [...naming.errors];
+    const streetValid = isValidPositionInStreet(skuFormRua, skuFormPos);
+    const qtyValid = Number.isFinite(skuFormQty) && skuFormQty >= 1;
+    const levelsValid = skuFormSelectedLevels.length >= 1;
+
+    if (!streetValid) {
+      errors.push(
+        `Torre ${skuFormPos} inválida na Rua ${skuFormRua}: ${getStreetPositionRuleDescription(skuFormRua)}`
+      );
+    }
+    if (!qtyValid) {
+      errors.push('Quantidade de peças deve ser maior ou igual a 1.');
+    }
+    if (!levelsValid) {
+      errors.push('Selecione ao menos 1 nível na torre para alocar o SKU.');
+    }
+
+    return {
+      ...naming,
+      isValid: errors.length === 0,
+      errors,
+      streetValid,
+      qtyValid,
+      levelsValid
+    };
+  }, [skuFormCode, skuFormRua, skuFormPos, skuFormQty, skuFormSelectedLevels]);
+
+  const handleSubmitAllocateSku = (downloadQuickCsv: boolean) => {
+    setSkuFormSubmitAttempted(true);
+    const validation = validateSkuAllocationForm();
+    if (!validation.isValid) {
+      playMacSound('alert', soundEnabled);
+      showToast(
+        'Padrão de SKU Inválido',
+        validation.errors[0] || 'Verifique o padrão do código (8 dígitos base - 3 dígitos cor - Tamanho).',
+        '🚨'
+      );
+      return;
+    }
+
+    const dec = decodeSkuPrefix(validation.normalizedCode, validation.colorCode, validation.size);
+    const codigoBase = validation.baseCode;
+    const finalCode = validation.normalizedCode;
+    const finalName = skuFormName.trim() || dec.autoName;
+    const groupedLocal = formatLevelsToSisplanLocal(
+      skuFormRua,
+      skuFormPos,
+      skuFormSelectedLevels
+    );
+    const skuKey = getCanonicalSkuKey(finalCode);
+    const filtered = skus.filter(
+      s => getCanonicalSkuKey(s.code) !== skuKey && s.id !== skuFormEditId
+    );
+    const depositoFinal = skuFormDeposito || '2';
+
+    const created: SkuItem[] = skuFormSelectedLevels.map((lv, idx) => ({
+      id: idx === 0 && skuFormEditId ? skuFormEditId : `sku-${Date.now()}-${lv}-${idx}`,
+      code: finalCode,
+      codigoBase,
+      name: finalName,
+      brand: dec.marca,
+      label: dec.etiqueta,
+      groupCode: dec.dGrupo,
+      groupName: dec.grupo,
+      colorCode: dec.colorCode,
+      colorName: dec.colorName,
+      colorHex: dec.colorHex,
+      size: dec.size,
+      deposito: depositoFinal,
+      rua: skuFormRua,
+      pos: skuFormPos,
+      nivel: lv,
+      wms: formatWmsAddress(skuFormRua, skuFormPos, lv),
+      rawLocal: groupedLocal,
+      colecao: skuFormColecao,
+      qty: skuFormQty,
+      icon: dec.icon
+    }));
+
+    const quickEntry: QuickAllocationEntry = {
+      skuKey,
+      code: finalCode,
+      codigoBase,
+      colorCode: dec.colorCode,
+      size: dec.size,
+      deposito: depositoFinal,
+      local: groupedLocal,
+      name: finalName,
+      wms: created[0].wms,
+      qty: skuFormQty,
+      allocatedAt: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    };
+
+    setQuickAllocatedEntries(prev => [
+      quickEntry,
+      ...prev.filter(e => e.skuKey !== skuKey)
+    ]);
+
+    const nextSkus = [...created, ...filtered];
+    setSkus(nextSkus);
+    selectStreet(skuFormRua);
+    setSelectedAddressKey(created[0].wms);
+    setSelectedSkuId(created[0].id);
+    persistCurrentState(nextSkus, movedSkusRegistry, transbordoRegistry);
+    setShowSkuModal(false);
+    scrollToWmsSlot(created[0].wms, skuFormRua, skuFormPos);
+
+    if (downloadQuickCsv) {
+      exportQuickMovementCsv([quickEntry], codigoBase);
+    } else {
+      playMacSound('success', soundEnabled);
+      showToast('SKU Alocado no Mapa', `${finalCode} salvo em ${groupedLocal}`, '🏢');
+    }
+  };
+
+  interface BatchQuickAssignment extends ParsedQuickListEntry {
+    dec: ReturnType<typeof decodeSkuPrefix>;
+    pos: number | null;
+    levels: number[];
+    groupedLocal: string;
+    primaryWms: string;
+    isCompletelyEmptyTower: boolean;
+    error?: string;
+  }
+
+  const batchQuickPlan = useMemo(() => {
+    const parsed = parseQuickSkuListText(batchSkuInputText);
+    const activeItems = parsed.items.filter(it => !batchRemovedKeys.has(it.skuKey));
+
+    const validPositions = getValidPositionsForStreet(batchTargetRua);
+    const safeStart = Math.max(1, batchStartPos || 1);
+    const orderedPositions = [
+      ...validPositions.filter(p => p >= safeStart),
+      ...validPositions.filter(p => p < safeStart)
+    ];
+
+    const needed = Math.max(1, batchLevelsPerSku || 1);
+    const reservedWms = new Set<string>();
+    const reservedTowers = new Set<number>();
+
+    const getFreeLevelsForTower = (pos: number): { freeLvls: number[]; isAllEmpty: boolean } => {
+      if (!isValidPositionInStreet(batchTargetRua, pos)) {
+        return { freeLvls: [], isAllEmpty: false };
+      }
+      const maxLv = getMaxLevelsForStreet(batchTargetRua, pos);
+      const freeLvls: number[] = [];
+      let occupiedAny = false;
+      for (let lv = 1; lv <= maxLv; lv++) {
+        const wms = formatWmsAddress(batchTargetRua, pos, lv);
+        const hasSku = (addressMap.get(wms) || []).length > 0;
+        const hasTrb = Boolean(transbordoRegistry[wms]);
+        const isRes = reservedWms.has(wms);
+        if (hasSku || hasTrb || isRes) {
+          occupiedAny = true;
+        } else {
+          freeLvls.push(lv);
+        }
+      }
+      return { freeLvls, isAllEmpty: !occupiedAny && freeLvls.length === maxLv };
+    };
+
+    const assignments: BatchQuickAssignment[] = activeItems.map(item => {
+      const dec = decodeSkuPrefix(item.normalizedCode, item.colorCode, item.size);
+      const overridePos = batchManualPosOverrides[item.skuKey];
+      let chosenPos: number | null = null;
+      let chosenLevels: number[] = [];
+      let isEmptyTower = false;
+
+      if (overridePos && isValidPositionInStreet(batchTargetRua, overridePos)) {
+        const check = getFreeLevelsForTower(overridePos);
+        if (check.freeLvls.length >= needed) {
+          chosenPos = overridePos;
+          chosenLevels = pickBestLevelsInColumn(check.freeLvls, needed);
+          isEmptyTower = check.isAllEmpty;
+        }
+      }
+
+      if (chosenPos === null && batchPreferEmptyTowers) {
+        for (const pos of orderedPositions) {
+          if (reservedTowers.has(pos)) continue;
+          const check = getFreeLevelsForTower(pos);
+          if (check.isAllEmpty && check.freeLvls.length >= needed) {
+            chosenPos = pos;
+            chosenLevels = pickBestLevelsInColumn(check.freeLvls, needed);
+            isEmptyTower = true;
+            break;
+          }
+        }
+      }
+
+      if (chosenPos === null) {
+        for (const pos of orderedPositions) {
+          if (reservedTowers.has(pos)) continue;
+          const check = getFreeLevelsForTower(pos);
+          if (check.freeLvls.length >= needed) {
+            chosenPos = pos;
+            chosenLevels = pickBestLevelsInColumn(check.freeLvls, needed);
+            isEmptyTower = check.isAllEmpty;
+            break;
+          }
+        }
+      }
+
+      if (chosenPos === null) {
+        for (const pos of orderedPositions) {
+          const check = getFreeLevelsForTower(pos);
+          if (check.freeLvls.length >= needed) {
+            chosenPos = pos;
+            chosenLevels = pickBestLevelsInColumn(check.freeLvls, needed);
+            isEmptyTower = check.isAllEmpty;
+            break;
+          }
+        }
+      }
+
+      if (chosenPos !== null && chosenLevels.length > 0) {
+        reservedTowers.add(chosenPos);
+        for (const lv of chosenLevels) {
+          reservedWms.add(formatWmsAddress(batchTargetRua, chosenPos, lv));
+        }
+        return {
+          ...item,
+          dec,
+          pos: chosenPos,
+          levels: chosenLevels,
+          groupedLocal: formatLevelsToSisplanLocal(batchTargetRua, chosenPos, chosenLevels),
+          primaryWms: formatWmsAddress(batchTargetRua, chosenPos, chosenLevels[0]),
+          isCompletelyEmptyTower: isEmptyTower
+        };
+      }
+
+      return {
+        ...item,
+        dec,
+        pos: null,
+        levels: [],
+        groupedLocal: '',
+        primaryWms: '',
+        isCompletelyEmptyTower: false,
+        error: `Sem torre livre suficiente na Rua ${batchTargetRua}`
+      };
+    });
+
+    return {
+      assignments,
+      assignableCount: assignments.filter(a => a.pos !== null).length,
+      duplicateCount: parsed.duplicateCount,
+      invalidFragments: parsed.invalidFragments
+    };
+  }, [
+    batchSkuInputText,
+    batchRemovedKeys,
+    batchTargetRua,
+    batchStartPos,
+    batchLevelsPerSku,
+    batchPreferEmptyTowers,
+    batchManualPosOverrides,
+    addressMap,
+    transbordoRegistry
+  ]);
+
+  const handleBatchQuickAllocate = (downloadQuickCsv: boolean) => {
+    const assignable = batchQuickPlan.assignments.filter(
+      a => a.pos !== null && a.levels.length > 0
+    );
+    if (assignable.length === 0) {
+      playMacSound('alert', soundEnabled);
+      showToast(
+        'Nenhum SKU Válido para Alocar',
+        'Cole uma lista de SKUs no padrão 8 dígitos - 3 dígitos - Tamanho com torres disponíveis.',
+        '⚠️'
+      );
+      return;
+    }
+
+    const batchKeys = new Set(assignable.map(a => getCanonicalSkuKey(a.normalizedCode)));
+    const filteredExisting = skus.filter(s => !batchKeys.has(getCanonicalSkuKey(s.code)));
+
+    const nowTs = Date.now();
+    const nowTime = new Date().toLocaleTimeString('pt-BR', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+    const depositoFinal = skuFormDeposito || '2';
+    const colecaoFinal = isReservedCol35Street(batchTargetRua) ? '35' : '51';
+    const qtyFinal = Math.max(1, batchDefaultQty || 1);
+
+    const newSkuItems: SkuItem[] = [];
+    const newQuickEntries: QuickAllocationEntry[] = [];
+
+    assignable.forEach((entry, itemIdx) => {
+      const pos = entry.pos!;
+      const canonicalKey = getCanonicalSkuKey(entry.normalizedCode);
+      entry.levels.forEach((lv, lvIdx) => {
+        newSkuItems.push({
+          id: `sku-batch-${nowTs}-${itemIdx}-${lv}-${lvIdx}`,
+          code: entry.normalizedCode,
+          codigoBase: entry.baseCode,
+          name: entry.dec.autoName,
+          brand: entry.dec.marca,
+          label: entry.dec.etiqueta,
+          groupCode: entry.dec.dGrupo,
+          groupName: entry.dec.grupo,
+          colorCode: entry.colorCode,
+          colorName: entry.dec.colorName,
+          colorHex: entry.dec.colorHex,
+          size: entry.size,
+          deposito: depositoFinal,
+          rua: batchTargetRua,
+          pos,
+          nivel: lv,
+          wms: formatWmsAddress(batchTargetRua, pos, lv),
+          rawLocal: entry.groupedLocal,
+          colecao: colecaoFinal,
+          qty: qtyFinal,
+          icon: entry.dec.icon
+        });
+      });
+
+      newQuickEntries.push({
+        skuKey: canonicalKey,
+        code: entry.normalizedCode,
+        codigoBase: entry.baseCode,
+        colorCode: entry.colorCode,
+        size: entry.size,
+        deposito: depositoFinal,
+        local: entry.groupedLocal,
+        name: entry.dec.autoName,
+        wms: entry.primaryWms,
+        qty: qtyFinal,
+        allocatedAt: nowTime
+      });
+    });
+
+    const nextSkus = [...newSkuItems, ...filteredExisting];
+    const newEntryKeys = new Set(newQuickEntries.map(e => e.skuKey));
+
+    setSkus(nextSkus);
+    setQuickAllocatedEntries(prev => [
+      ...newQuickEntries,
+      ...prev.filter(e => !newEntryKeys.has(e.skuKey))
+    ]);
+
+    selectStreet(batchTargetRua);
+    setSelectedAddressKey(newQuickEntries[0].wms);
+    setSelectedSkuId(newSkuItems[0].id);
+    persistCurrentState(nextSkus, movedSkusRegistry, transbordoRegistry);
+
+    setBatchSkuInputText('');
+    setBatchManualPosOverrides({});
+    setBatchRemovedKeys(new Set());
+    setShowSkuModal(false);
+    scrollToWmsSlot(newQuickEntries[0].wms, batchTargetRua, assignable[0].pos!);
+
+    if (downloadQuickCsv) {
+      exportQuickMovementCsv(newQuickEntries, `lote_${batchTargetRua}`);
+    } else {
+      playMacSound('success', soundEnabled);
+      showToast(
+        `${assignable.length} SKUs Alocados na Rua ${batchTargetRua}`,
+        `Adicionados à Fila de Movimentação Rápida (${newQuickEntries[0].local} ...).`,
+        '⚡'
+      );
+    }
   };
 
   const openRelocateModalWithSku = (skuItem?: SkuItem | null) => {
@@ -2776,20 +3246,20 @@ export default function App() {
       {/* TOP MENUBAR                                                          */}
       {/* ==================================================================== */}
       {!isFullscreen && (
-        <header className="mac-menubar min-h-8 py-1 px-2 sm:px-4 flex items-center justify-between gap-2 text-xs font-medium z-40 shrink-0 border-b border-black/10 dark:border-white/10 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md rounded-none">
-          <div className="flex items-center space-x-2 sm:space-x-3 relative shrink-0">
+        <header className="mac-menubar min-h-8 py-1 px-2 sm:px-4 flex items-center justify-between gap-2 text-xs font-medium z-[45] shrink-0 border-b border-black/10 dark:border-white/10 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md rounded-none relative">
+          <div className="flex items-center space-x-1.5 sm:space-x-2.5 min-w-0 overflow-x-auto no-scrollbar">
             <button
               type="button"
               onClick={e => {
                 e.stopPropagation();
                 setOpenMenu(prev => (prev === 'apple' ? null : 'apple'));
               }}
-              className="flex items-center space-x-1 hover:bg-black/10 dark:hover:bg-white/15 px-1.5 py-0.5 rounded transition"
+              className="flex items-center space-x-1 hover:bg-black/10 dark:hover:bg-white/15 px-1.5 py-0.5 rounded transition shrink-0"
             >
               <span className="text-sm">✈️</span>
             </button>
 
-            <span className="font-display font-bold tracking-tight">EstoqueOS</span>
+            <span className="font-display font-bold tracking-tight shrink-0 whitespace-nowrap">EstoqueOS</span>
 
             <button
               type="button"
@@ -2797,7 +3267,9 @@ export default function App() {
                 e.stopPropagation();
                 setOpenMenu(prev => (prev === 'file' ? null : 'file'));
               }}
-              className="hover:bg-black/10 dark:hover:bg-white/15 px-2 py-0.5 rounded transition"
+              className={`hover:bg-black/10 dark:hover:bg-white/15 px-2 py-0.5 rounded transition shrink-0 whitespace-nowrap ${
+                openMenu === 'file' ? 'bg-black/10 dark:bg-white/15 font-bold' : ''
+              }`}
             >
               Arquivo
             </button>
@@ -2807,21 +3279,23 @@ export default function App() {
                 e.stopPropagation();
                 setOpenMenu(prev => (prev === 'view' ? null : 'view'));
               }}
-              className="hover:bg-black/10 dark:hover:bg-white/15 px-2 py-0.5 rounded transition"
+              className={`hover:bg-black/10 dark:hover:bg-white/15 px-2 py-0.5 rounded transition shrink-0 whitespace-nowrap ${
+                openMenu === 'view' ? 'bg-black/10 dark:bg-white/15 font-bold' : ''
+              }`}
             >
               Visualizar
             </button>
             <button
               type="button"
               onClick={() => openAllocateOrEditSkuModal(null)}
-              className="hover:bg-black/10 dark:hover:bg-white/15 px-2 py-0.5 rounded transition hidden sm:inline-block"
+              className="hover:bg-black/10 dark:hover:bg-white/15 px-2 py-0.5 rounded transition hidden lg:inline-block shrink-0 whitespace-nowrap"
             >
               + Alocar SKU
             </button>
             <button
               type="button"
               onClick={() => openRelocateModalWithSku(null)}
-              className="hover:bg-black/10 dark:hover:bg-white/15 px-2 py-0.5 rounded transition hidden md:inline-block text-amber-600 dark:text-amber-400 font-semibold"
+              className="hover:bg-black/10 dark:hover:bg-white/15 px-2 py-0.5 rounded transition hidden xl:inline-block text-amber-600 dark:text-amber-400 font-semibold shrink-0 whitespace-nowrap"
               title="Remanejamento Individual ou em Lote via CSV (⌘R)"
             >
               ⇄ Remanejar (Lote / SKU)
@@ -2829,14 +3303,14 @@ export default function App() {
             <button
               type="button"
               onClick={() => setShowImportModal(true)}
-              className="hover:bg-black/10 dark:hover:bg-white/15 px-2 py-0.5 rounded transition hidden md:inline-block text-emerald-600 dark:text-emerald-400 font-semibold"
+              className="hover:bg-black/10 dark:hover:bg-white/15 px-2 py-0.5 rounded transition hidden xl:inline-block text-emerald-600 dark:text-emerald-400 font-semibold shrink-0 whitespace-nowrap"
             >
               📥 Importar CSV
             </button>
             <button
               type="button"
               onClick={exportBarraInvadersGuideCsv}
-              className="hover:bg-black/10 dark:hover:bg-white/15 px-2 py-0.5 rounded transition hidden xl:inline-block text-orange-600 dark:text-orange-400 font-semibold"
+              className="hover:bg-black/10 dark:hover:bg-white/15 px-2 py-0.5 rounded transition hidden 2xl:inline-block text-orange-600 dark:text-orange-400 font-semibold shrink-0 whitespace-nowrap"
               title="Exportar CSV de itens em locais incorretos com rotulação 'S/Cadastro'"
             >
               🚚 Exportar Incorretos CSV
@@ -2844,17 +3318,18 @@ export default function App() {
             <button
               type="button"
               onClick={() => setShowCloudModal(true)}
-              className="hover:bg-black/10 dark:hover:bg-white/15 px-2 py-0.5 rounded transition hidden lg:inline-block text-mac-blue font-bold"
+              className="hover:bg-black/10 dark:hover:bg-white/15 px-2 py-0.5 rounded transition hidden 2xl:inline-block text-mac-blue font-bold shrink-0 whitespace-nowrap"
             >
               ☁️ Google Sites / Nuvem
             </button>
+          </div>
 
-            {/* Apple Menu Dropdown */}
-            {openMenu === 'apple' && (
-              <div
-                onClick={e => e.stopPropagation()}
-                className="absolute left-0 top-7 w-64 mac-window rounded-xl p-1.5 shadow-2xl z-50 text-xs space-y-1"
-              >
+          {/* Menubar Dropdowns (Anchored cleanly to header, never clipped by overflow) */}
+          {openMenu === 'apple' && (
+            <div
+              onClick={e => e.stopPropagation()}
+              className="absolute left-2 top-8 w-[min(17rem,calc(100vw-1rem))] max-h-[calc(100dvh-3.25rem)] overflow-y-auto overscroll-contain mac-window rounded-xl p-1.5 shadow-2xl z-[48] text-xs space-y-1"
+            >
                 <button
                   type="button"
                   onClick={() => {
@@ -2900,7 +3375,7 @@ export default function App() {
             {openMenu === 'file' && (
               <div
                 onClick={e => e.stopPropagation()}
-                className="absolute left-20 top-7 w-72 mac-window rounded-xl p-1.5 shadow-2xl z-50 text-xs space-y-1"
+                className="absolute left-2 sm:left-20 top-8 w-[min(22rem,calc(100vw-1rem))] max-h-[calc(100dvh-3.25rem)] overflow-y-auto overscroll-contain mac-window rounded-xl p-1.5 shadow-2xl z-[48] text-xs space-y-1"
               >
                 <button
                   type="button"
@@ -2908,32 +3383,70 @@ export default function App() {
                     setOpenMenu(null);
                     setShowImportModal(true);
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex justify-between font-semibold text-emerald-500"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2.5 font-semibold text-emerald-600 dark:text-emerald-400"
                 >
-                  <span>📥 Importar Planilha CSV...</span>
-                  <span className="font-mono text-[10px] opacity-70">⌘O</span>
+                  <span className="truncate flex-1 min-w-0">📥 Importar Planilha CSV...</span>
+                  <span className="font-mono text-[10px] opacity-70 shrink-0 whitespace-nowrap">⌘O</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => {
                     setOpenMenu(null);
-                    openAllocateOrEditSkuModal(null);
+                    openAllocateOrEditSkuModal(null, undefined, 'single');
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex justify-between"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2.5"
                 >
-                  <span>+ Alocar SKU em Endereço</span>
-                  <span className="font-mono text-[10px] opacity-70">⌘N</span>
+                  <span className="truncate flex-1 min-w-0">+ Alocar SKU em Endereço</span>
+                  <span className="font-mono text-[10px] opacity-70 shrink-0 whitespace-nowrap">⌘N</span>
                 </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpenMenu(null);
+                    openAllocateOrEditSkuModal(null, undefined, 'batch');
+                  }}
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2.5 text-mac-blue font-semibold"
+                >
+                  <span className="truncate flex-1 min-w-0">⚡ Importar Lista Rápida de SKUs...</span>
+                  <span className="font-mono text-[10px] opacity-75 shrink-0 whitespace-nowrap">Lote</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpenMenu(null);
+                    exportQuickMovementCsv();
+                  }}
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-emerald-600 hover:text-white transition flex items-center justify-between gap-2.5 text-emerald-700 dark:text-emerald-300 font-bold"
+                  title="Baixar CSV de movimentação rápida com novos SKUs alocados (mesmo formato SISPLAN)"
+                >
+                  <span className="truncate flex-1 min-w-0">⚡ CSV Movimentação Rápida (SISPLAN)</span>
+                  <span className="font-mono text-[10px] px-1.5 py-0.2 rounded-full bg-emerald-500/20 font-extrabold shrink-0 whitespace-nowrap">
+                    {quickAllocatedEntries.length}
+                  </span>
+                </button>
+                {quickAllocatedEntries.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpenMenu(null);
+                      clearQuickAllocationQueue();
+                    }}
+                    className="w-full text-left px-3 py-1 rounded-lg hover:bg-rose-500 hover:text-white transition flex items-center justify-between gap-2.5 text-[11px] text-rose-600 dark:text-rose-400 font-semibold"
+                  >
+                    <span className="truncate flex-1 min-w-0">🧹 Limpar Fila (Movimentação Rápida)</span>
+                    <span className="font-mono text-[10px] opacity-75 shrink-0 whitespace-nowrap">Limpar Fila</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => {
                     setOpenMenu(null);
                     openRelocateModalWithSku(null);
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex justify-between text-amber-500 font-semibold"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2.5 text-amber-600 dark:text-amber-400 font-semibold"
                 >
-                  <span>⇄ Remanejar (Individual ou Lote CSV)...</span>
-                  <span className="font-mono text-[10px] opacity-70">⌘R</span>
+                  <span className="truncate flex-1 min-w-0">⇄ Remanejar (Individual ou Lote CSV)...</span>
+                  <span className="font-mono text-[10px] opacity-70 shrink-0 whitespace-nowrap">⌘R</span>
                 </button>
                 <button
                   type="button"
@@ -2941,10 +3454,10 @@ export default function App() {
                     setOpenMenu(null);
                     setTransbordoSelectMode(true);
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-yellow-500 hover:text-slate-950 transition flex justify-between text-yellow-600 dark:text-yellow-400 font-bold"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-yellow-500 hover:text-slate-950 transition flex items-center justify-between gap-2.5 text-yellow-600 dark:text-yellow-400 font-bold"
                 >
-                  <span>⚡ Selecionar Colmeias p/ Transbordo</span>
-                  <span className="font-mono text-[10px] opacity-80">Mini Pulmão</span>
+                  <span className="truncate flex-1 min-w-0">⚡ Selecionar Colmeias p/ Transbordo</span>
+                  <span className="font-mono text-[10px] opacity-80 shrink-0 whitespace-nowrap">Mini Pulmão</span>
                 </button>
                 <button
                   type="button"
@@ -2952,10 +3465,10 @@ export default function App() {
                     setOpenMenu(null);
                     exportTransbordoCsv();
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-yellow-500 hover:text-slate-950 transition flex justify-between text-yellow-600 dark:text-yellow-400 font-semibold"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-yellow-500 hover:text-slate-950 transition flex items-center justify-between gap-2.5 text-yellow-600 dark:text-yellow-400 font-semibold"
                 >
-                  <span>📤 Exportar Colmeias Transbordo (.CSV)</span>
-                  <span className="font-mono text-[10px] opacity-80">CSV</span>
+                  <span className="truncate flex-1 min-w-0">📤 Exportar Colmeias Transbordo (.CSV)</span>
+                  <span className="font-mono text-[10px] opacity-80 shrink-0 whitespace-nowrap">CSV</span>
                 </button>
                 <button
                   type="button"
@@ -2963,13 +3476,10 @@ export default function App() {
                     setOpenMenu(null);
                     setShowMovementHistoryModal(true);
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex justify-between text-blue-600 dark:text-blue-400 font-bold"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2.5 text-blue-600 dark:text-blue-400 font-bold"
                 >
-                  <span className="flex items-center gap-1.5">
-                    <span>🚚</span>
-                    <span>Histórico de Movimentações (De ➔ Para)</span>
-                  </span>
-                  <span className="font-mono text-[9px] px-1.5 py-0.2 rounded-full bg-blue-500/20 text-blue-600 dark:text-blue-400 font-extrabold">
+                  <span className="truncate flex-1 min-w-0">🚚 Histórico de Movimentações (De ➔ Para)</span>
+                  <span className="font-mono text-[9px] px-1.5 py-0.2 rounded-full bg-blue-500/20 font-extrabold shrink-0 whitespace-nowrap">
                     {movedCount}
                   </span>
                 </button>
@@ -2979,10 +3489,10 @@ export default function App() {
                     setOpenMenu(null);
                     exportDraggedChangesCsv(false);
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-purple-600 hover:text-white transition flex justify-between text-purple-600 dark:text-purple-400 font-bold"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-purple-600 hover:text-white transition flex items-center justify-between gap-2.5 text-purple-600 dark:text-purple-400 font-bold"
                 >
-                  <span>✋ Exportar Alterações de Arraste (SISPLAN)</span>
-                  <span className="font-mono text-[10px] opacity-70">⌘D</span>
+                  <span className="truncate flex-1 min-w-0">✋ Exportar Alterações de Arraste (SISPLAN)</span>
+                  <span className="font-mono text-[10px] opacity-70 shrink-0 whitespace-nowrap">⌘D</span>
                 </button>
                 <button
                   type="button"
@@ -2990,10 +3500,10 @@ export default function App() {
                     setOpenMenu(null);
                     exportDraggedChangesCsv(true);
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-purple-600 hover:text-white transition flex justify-between text-purple-500"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-purple-600 hover:text-white transition flex items-center justify-between gap-2.5 text-purple-500"
                 >
-                  <span>📋 Relatório De → Para (Arraste)</span>
-                  <span className="font-mono text-[10px] opacity-70">CSV</span>
+                  <span className="truncate flex-1 min-w-0">📋 Relatório De → Para (Arraste)</span>
+                  <span className="font-mono text-[10px] opacity-70 shrink-0 whitespace-nowrap">CSV</span>
                 </button>
                 <button
                   type="button"
@@ -3001,11 +3511,11 @@ export default function App() {
                     setOpenMenu(null);
                     exportBarraInvadersGuideCsv();
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-emerald-600 hover:text-white transition flex justify-between text-emerald-600 dark:text-emerald-400 font-bold"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-emerald-600 hover:text-white transition flex items-center justify-between gap-2.5 text-emerald-600 dark:text-emerald-400 font-bold"
                   title="Exportar roteiro passo a passo com onde tirar, quantidade e onde guardar (ou S/Cadastro)"
                 >
-                  <span>🚚 Guia do Operador: Onde Tirar ➔ Onde Guardar (.CSV)</span>
-                  <span className="font-mono text-[10px] opacity-85">ROTEIRO</span>
+                  <span className="truncate flex-1 min-w-0">🚚 Guia do Operador: Onde Tirar ➔ Guardar</span>
+                  <span className="font-mono text-[10px] opacity-85 shrink-0 whitespace-nowrap">ROTEIRO</span>
                 </button>
                 <div className="border-t border-black/10 dark:border-white/10 my-1" />
                 <button
@@ -3014,13 +3524,10 @@ export default function App() {
                     setOpenMenu(null);
                     executeManualSave();
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-blue-600 hover:text-white transition flex justify-between font-bold text-blue-600 dark:text-blue-400"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-blue-600 hover:text-white transition flex items-center justify-between gap-2.5 font-bold text-blue-600 dark:text-blue-400"
                 >
-                  <span className="flex items-center gap-1.5">
-                    <span>💾</span>
-                    <span>Salvar Progresso Agora</span>
-                  </span>
-                  <span className="font-mono text-[10px] opacity-80">⌘S</span>
+                  <span className="truncate flex-1 min-w-0">💾 Salvar Progresso Agora</span>
+                  <span className="font-mono text-[10px] opacity-80 shrink-0 whitespace-nowrap">⌘S</span>
                 </button>
                 <button
                   type="button"
@@ -3028,13 +3535,10 @@ export default function App() {
                     setOpenMenu(null);
                     executeSaveAndReload();
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-blue-600 hover:text-white transition flex justify-between text-slate-700 dark:text-slate-200"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-blue-600 hover:text-white transition flex items-center justify-between gap-2.5 text-slate-700 dark:text-slate-200"
                 >
-                  <span className="flex items-center gap-1.5">
-                    <span>🔄</span>
-                    <span>Salvar & Recarregar Página</span>
-                  </span>
-                  <span className="font-mono text-[10px] opacity-70">Reload</span>
+                  <span className="truncate flex-1 min-w-0">🔄 Salvar & Recarregar Página</span>
+                  <span className="font-mono text-[10px] opacity-70 shrink-0 whitespace-nowrap">Reload</span>
                 </button>
                 <button
                   type="button"
@@ -3042,13 +3546,10 @@ export default function App() {
                     setOpenMenu(null);
                     setShowAutoSaveModal(true);
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex justify-between text-slate-700 dark:text-slate-200"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2.5 text-slate-700 dark:text-slate-200"
                 >
-                  <span className="flex items-center gap-1.5">
-                    <span>⚙️</span>
-                    <span>Automação de Salvamento (2 min)</span>
-                  </span>
-                  <span className="font-mono text-[10px] opacity-75">{isAutoSaveEnabled ? 'Ativo' : 'Pausado'}</span>
+                  <span className="truncate flex-1 min-w-0">⚙️ Automação de Salvamento (2 min)</span>
+                  <span className="font-mono text-[10px] opacity-75 shrink-0 whitespace-nowrap">{isAutoSaveEnabled ? 'Ativo' : 'Pausado'}</span>
                 </button>
                 <div className="border-t border-black/10 dark:border-white/10 my-1" />
                 <button
@@ -3057,10 +3558,10 @@ export default function App() {
                     setOpenMenu(null);
                     setShowCloudModal(true);
                   }}
-                  className="w-full text-left px-3 py-2 rounded-lg bg-mac-blue/15 hover:bg-mac-blue hover:text-white transition flex justify-between font-extrabold text-mac-blue"
+                  className="w-full text-left px-3 py-2 rounded-lg bg-mac-blue/15 hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2.5 font-extrabold text-mac-blue"
                 >
-                  <span>☁️ Sincronizar Google Sheets / Sites...</span>
-                  <span className="font-mono text-[10px] opacity-80">Nuvem</span>
+                  <span className="truncate flex-1 min-w-0">☁️ Sincronizar Google Sheets / Sites...</span>
+                  <span className="font-mono text-[10px] opacity-80 shrink-0 whitespace-nowrap">Nuvem</span>
                 </button>
                 <div className="border-t border-black/10 dark:border-white/10 my-1" />
                 <button
@@ -3069,10 +3570,10 @@ export default function App() {
                     setOpenMenu(null);
                     exportCurrentMapCsv('grouped');
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex justify-between font-semibold"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2.5 font-semibold"
                 >
-                  <span>📤 Exportar CSV Atualizado (SISPLAN)</span>
-                  <span className="font-mono text-[10px] opacity-70">⌘E</span>
+                  <span className="truncate flex-1 min-w-0">📤 Exportar CSV Atualizado (SISPLAN)</span>
+                  <span className="font-mono text-[10px] opacity-70 shrink-0 whitespace-nowrap">⌘E</span>
                 </button>
                 <button
                   type="button"
@@ -3080,10 +3581,10 @@ export default function App() {
                     setOpenMenu(null);
                     exportCurrentMapCsv('flat');
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex justify-between"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2.5"
                 >
-                  <span>📄 Exportar CSV Detalhado (1 Nível/Linha)</span>
-                  <span className="font-mono text-[10px] opacity-70">CSV</span>
+                  <span className="truncate flex-1 min-w-0">📄 Exportar CSV Detalhado (1 Nível/Linha)</span>
+                  <span className="font-mono text-[10px] opacity-70 shrink-0 whitespace-nowrap">CSV</span>
                 </button>
                 <div className="border-t border-black/10 dark:border-white/10 my-1" />
                 <button
@@ -3092,14 +3593,11 @@ export default function App() {
                     setOpenMenu(null);
                     exportCurrentStreetAddressesCsv(selectedStreet, false);
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-emerald-600 hover:text-white transition flex justify-between text-emerald-600 dark:text-emerald-400 font-bold"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-emerald-600 hover:text-white transition flex items-center justify-between gap-2.5 text-emerald-600 dark:text-emerald-400 font-bold"
                   title={`Exportar lista de todos os endereços da Rua ${selectedStreet} (100% da rua, inclusive vazios, formato puro RA.001.1)`}
                 >
-                  <span className="flex items-center gap-1.5">
-                    <span>📍</span>
-                    <span>Exportar Endereços da Rua {selectedStreet} (.CSV)</span>
-                  </span>
-                  <span className="font-mono text-[10px] opacity-80">Inclusive Vazios</span>
+                  <span className="truncate flex-1 min-w-0">📍 Exportar Endereços da Rua {selectedStreet}</span>
+                  <span className="font-mono text-[10px] opacity-80 shrink-0 whitespace-nowrap">Vazios Inc.</span>
                 </button>
                 <button
                   type="button"
@@ -3107,14 +3605,11 @@ export default function App() {
                     setOpenMenu(null);
                     exportAllMapAddressesCsv(false);
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-emerald-600 hover:text-white transition flex justify-between text-emerald-600 dark:text-emerald-400 font-semibold"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-emerald-600 hover:text-white transition flex items-center justify-between gap-2.5 text-emerald-600 dark:text-emerald-400 font-semibold"
                   title="Exportar lista de todos os endereços de todas as ruas RA a RH (inclusive vazios, formato puro)"
                 >
-                  <span className="flex items-center gap-1.5">
-                    <span>🌐</span>
-                    <span>Exportar Todas as Ruas RA–RH (.CSV)</span>
-                  </span>
-                  <span className="font-mono text-[10px] opacity-80">Todas as Ruas</span>
+                  <span className="truncate flex-1 min-w-0">🌐 Exportar Todas as Ruas RA–RH (.CSV)</span>
+                  <span className="font-mono text-[10px] opacity-80 shrink-0 whitespace-nowrap">Todas</span>
                 </button>
                 <button
                   type="button"
@@ -3122,14 +3617,11 @@ export default function App() {
                     setOpenMenu(null);
                     setShowExportAddressesModal(true);
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex justify-between text-slate-700 dark:text-slate-200 font-medium"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2.5 text-slate-700 dark:text-slate-200 font-medium"
                   title="Abrir painel para personalizar opções e pré-visualizar antes de baixar"
                 >
-                  <span className="flex items-center gap-1.5">
-                    <span>⚙️</span>
-                    <span>Personalizar Lista de Endereços...</span>
-                  </span>
-                  <span className="font-mono text-[10px] opacity-70">Painel</span>
+                  <span className="truncate flex-1 min-w-0">⚙️ Personalizar Lista de Endereços...</span>
+                  <span className="font-mono text-[10px] opacity-70 shrink-0 whitespace-nowrap">Painel</span>
                 </button>
                 <button
                   type="button"
@@ -3137,10 +3629,10 @@ export default function App() {
                     setOpenMenu(null);
                     triggerCsvDownload(SAMPLE_CSV_DATA, 'modelo_sisplan_wms.csv');
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex justify-between"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2.5"
                 >
-                  <span>📋 Baixar Modelo CSV de Exemplo</span>
-                  <span className="font-mono text-[10px] opacity-70">CSV</span>
+                  <span className="truncate flex-1 min-w-0">📋 Baixar Modelo CSV de Exemplo</span>
+                  <span className="font-mono text-[10px] opacity-70 shrink-0 whitespace-nowrap">CSV</span>
                 </button>
               </div>
             )}
@@ -3149,7 +3641,7 @@ export default function App() {
             {openMenu === 'view' && (
               <div
                 onClick={e => e.stopPropagation()}
-                className="absolute left-36 top-7 w-64 mac-window rounded-xl p-1.5 shadow-2xl z-50 text-xs space-y-1"
+                className="absolute left-2 sm:left-36 top-8 w-[min(19rem,calc(100vw-1rem))] max-h-[calc(100dvh-3.25rem)] overflow-y-auto overscroll-contain mac-window rounded-xl p-1.5 shadow-2xl z-[48] text-xs space-y-1"
               >
                 <button
                   type="button"
@@ -3157,7 +3649,7 @@ export default function App() {
                     setOpenMenu(null);
                     setMapMode('cards');
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition truncate"
                 >
                   🃏 Modo Cards de Endereço (Colmeia)
                 </button>
@@ -3167,7 +3659,7 @@ export default function App() {
                     setOpenMenu(null);
                     setMapMode('rack');
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition truncate"
                 >
                   🏢 Modo Matriz Porta-Paletes (N1–N7)
                 </button>
@@ -3187,13 +3679,10 @@ export default function App() {
                       return next;
                     });
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between font-bold text-slate-700 dark:text-slate-200"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2 font-bold text-slate-700 dark:text-slate-200"
                 >
-                  <span className="flex items-center gap-1.5">
-                    <span>📊</span>
-                    <span>Dashboard Executivo (Topo)</span>
-                  </span>
-                  <span className={`font-mono text-[9px] px-1.5 py-0.2 rounded-full font-bold ${
+                  <span className="truncate flex-1 min-w-0">📊 Dashboard Executivo (Topo)</span>
+                  <span className={`font-mono text-[9px] px-1.5 py-0.2 rounded-full font-bold shrink-0 whitespace-nowrap ${
                     showExecutiveDashboard
                       ? 'bg-mac-blue/20 text-mac-blue ring-1 ring-mac-blue/40'
                       : 'bg-black/10 dark:bg-white/10 text-slate-400'
@@ -3207,13 +3696,10 @@ export default function App() {
                     setOpenMenu(null);
                     setShowReportModal(true);
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between font-bold text-mac-blue"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2 font-bold text-mac-blue"
                 >
-                  <span className="flex items-center gap-1.5">
-                    <span>📊</span>
-                    <span>Gerar Relatório</span>
-                  </span>
-                  <span className="font-mono text-[10px] opacity-75">D3 Analytics</span>
+                  <span className="truncate flex-1 min-w-0">📊 Gerar Relatório</span>
+                  <span className="font-mono text-[10px] opacity-75 shrink-0 whitespace-nowrap">D3 Analytics</span>
                 </button>
                 <button
                   type="button"
@@ -3221,13 +3707,10 @@ export default function App() {
                     setOpenMenu(null);
                     setShowAuditModal(true);
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between font-bold text-rose-600 dark:text-rose-400 hover:text-white"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2 font-bold text-rose-600 dark:text-rose-400 hover:text-white"
                 >
-                  <span className="flex items-center gap-1.5">
-                    <span>📋</span>
-                    <span>Auditoria de Inventário</span>
-                  </span>
-                  <span className="font-mono text-[9px] px-1.5 py-0.2 rounded-full bg-rose-500/20 text-rose-600 dark:text-rose-400 font-extrabold">
+                  <span className="truncate flex-1 min-w-0">📋 Auditoria de Inventário</span>
+                  <span className="font-mono text-[9px] px-1.5 py-0.2 rounded-full bg-rose-500/20 text-rose-600 dark:text-rose-400 font-extrabold shrink-0 whitespace-nowrap">
                     {conflictAnalysis.allConflictSlots.size + conflictAnalysis.invaderSlots.size} Alertas
                   </span>
                 </button>
@@ -3237,14 +3720,11 @@ export default function App() {
                     setOpenMenu(null);
                     exportBarraInvadersGuideCsv();
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-emerald-600 hover:text-white transition flex items-center justify-between font-bold text-emerald-600 dark:text-emerald-400"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-emerald-600 hover:text-white transition flex items-center justify-between gap-2 font-bold text-emerald-600 dark:text-emerald-400"
                 >
-                  <span className="flex items-center gap-1.5">
-                    <span>🚚</span>
-                    <span>Guia do Operador (.CSV)</span>
-                  </span>
-                  <span className="font-mono text-[9px] px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 font-extrabold">
-                    Onde Tirar / Guardar
+                  <span className="truncate flex-1 min-w-0">🚚 Guia do Operador (.CSV)</span>
+                  <span className="font-mono text-[9px] px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 font-extrabold shrink-0 whitespace-nowrap">
+                    Roteiro
                   </span>
                 </button>
                 <button
@@ -3253,13 +3733,10 @@ export default function App() {
                     setOpenMenu(null);
                     setShowAutoSaveModal(true);
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between text-blue-600 dark:text-blue-400 font-semibold"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2 text-blue-600 dark:text-blue-400 font-semibold"
                 >
-                  <span className="flex items-center gap-1.5">
-                    <span>💾</span>
-                    <span>Status do Auto-Salvamento</span>
-                  </span>
-                  <span className="font-mono text-[10px] opacity-75">{Math.floor(autoSaveCountdown / 60)}m {autoSaveCountdown % 60}s</span>
+                  <span className="truncate flex-1 min-w-0">💾 Status do Auto-Salvamento</span>
+                  <span className="font-mono text-[10px] opacity-75 shrink-0 whitespace-nowrap">{Math.floor(autoSaveCountdown / 60)}m {autoSaveCountdown % 60}s</span>
                 </button>
                 <button
                   type="button"
@@ -3267,13 +3744,10 @@ export default function App() {
                     setOpenMenu(null);
                     setShowMovementHistoryModal(true);
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between font-bold text-blue-600 dark:text-blue-400"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2 font-bold text-blue-600 dark:text-blue-400"
                 >
-                  <span className="flex items-center gap-1.5">
-                    <span>🚚</span>
-                    <span>Histórico de Movimentações</span>
-                  </span>
-                  <span className="font-mono text-[9px] px-1.5 py-0.2 rounded-full bg-blue-500/20 text-blue-600 dark:text-blue-400 font-extrabold">
+                  <span className="truncate flex-1 min-w-0">🚚 Histórico de Movimentações</span>
+                  <span className="font-mono text-[9px] px-1.5 py-0.2 rounded-full bg-blue-500/20 text-blue-600 dark:text-blue-400 font-extrabold shrink-0 whitespace-nowrap">
                     {movedCount}
                   </span>
                 </button>
@@ -3292,13 +3766,10 @@ export default function App() {
                       return next;
                     });
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between font-bold text-orange-600 dark:text-orange-400"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2 font-bold text-orange-600 dark:text-orange-400"
                 >
-                  <span className="flex items-center gap-1.5">
-                    <span>🔥</span>
-                    <span>Modo Heatmap (Mapa de Calor)</span>
-                  </span>
-                  <span className={`font-mono text-[9px] px-1.5 py-0.2 rounded-full font-bold ${
+                  <span className="truncate flex-1 min-w-0">🔥 Modo Heatmap (Mapa de Calor)</span>
+                  <span className={`font-mono text-[9px] px-1.5 py-0.2 rounded-full font-bold shrink-0 whitespace-nowrap ${
                     isHeatmapActive
                       ? 'bg-orange-500/20 text-orange-600 dark:text-orange-300 ring-1 ring-orange-500/40'
                       : 'bg-black/10 dark:bg-white/10 text-slate-400'
@@ -3315,26 +3786,20 @@ export default function App() {
                     setSpotlightSelectedIndex(0);
                     playMacSound('open', soundEnabled && spotlightSoundEnabled);
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2"
                 >
-                  <span className="flex items-center gap-1.5">
-                    <span>🔍</span>
-                    <span>Buscar no Spotlight</span>
-                  </span>
-                  <span className="font-mono text-[10px] opacity-75">⌘K</span>
+                  <span className="truncate flex-1 min-w-0">🔍 Buscar no Spotlight</span>
+                  <span className="font-mono text-[10px] opacity-75 shrink-0 whitespace-nowrap">⌘K</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => {
                     toggleSpotlightSound();
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between text-xs"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2 text-xs"
                 >
-                  <span className="flex items-center gap-1.5">
-                    <span>{soundEnabled && spotlightSoundEnabled ? '🔊' : '🔇'}</span>
-                    <span>Feedback Sonoro (Spotlight)</span>
-                  </span>
-                  <span className={`font-mono text-[9px] px-1.5 py-0.2 rounded-full font-bold ${
+                  <span className="truncate flex-1 min-w-0">{soundEnabled && spotlightSoundEnabled ? '🔊' : '🔇'} Feedback Sonoro (Spotlight)</span>
+                  <span className={`font-mono text-[9px] px-1.5 py-0.2 rounded-full font-bold shrink-0 whitespace-nowrap ${
                     soundEnabled && spotlightSoundEnabled ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-400' : 'bg-black/10 dark:bg-white/10 text-slate-400'
                   }`}>
                     {soundEnabled && spotlightSoundEnabled ? 'Ativado' : 'Mudo'}
@@ -3347,14 +3812,13 @@ export default function App() {
                     setOpenMenu(null);
                     setIsFullscreen(f => !f);
                   }}
-                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between font-semibold text-mac-blue"
+                  className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2 font-semibold text-mac-blue"
                 >
-                  <span>⛶ Modo Mapa Tela Cheia</span>
-                  <span className="font-mono text-[10px] opacity-75">Foco 100%</span>
+                  <span className="truncate flex-1 min-w-0">⛶ Modo Mapa Tela Cheia</span>
+                  <span className="font-mono text-[10px] opacity-75 shrink-0 whitespace-nowrap">Foco 100%</span>
                 </button>
               </div>
             )}
-          </div>
 
           {/* Right Status Icons */}
           <div className="flex items-center space-x-1.5 sm:space-x-2 overflow-x-auto no-scrollbar max-w-full shrink-0">
@@ -3540,8 +4004,8 @@ export default function App() {
       <main className="flex-1 w-full h-full flex flex-col overflow-hidden min-h-0 relative">
         <div className="w-full h-full flex flex-col overflow-hidden relative bg-white/70 dark:bg-slate-900/70 rounded-none border-none">
           {/* Main Warehouse Toolbar */}
-          <div className="min-h-11 py-1.5 px-2.5 sm:px-4 flex flex-wrap md:flex-nowrap items-center justify-between gap-2 border-b border-black/10 dark:border-white/10 shrink-0 bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-none">
-            <div className="flex items-center space-x-2 sm:space-x-3 min-w-0">
+          <div className="min-h-11 py-1.5 px-2.5 sm:px-4 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 border-b border-black/10 dark:border-white/10 shrink-0 bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-none">
+            <div className="flex items-center space-x-2 sm:space-x-3 shrink-0 max-w-full">
               <button
                 type="button"
                 onClick={() => {
@@ -3571,30 +4035,30 @@ export default function App() {
                     Mapa Visual de Endereçamento WMS
                   </h1>
                   <p className="text-[10px] text-slate-500 dark:text-slate-400 font-mono mt-0.5 truncate">
-                    Ruas RA–RH • Col. 35 (RF–RH) • Acessórios (AA–AF) • Pulmão (PA–PI)
+                    Ruas RA–RH • Acessórios (AA–AF) • Pulmão (PA–PI)
                   </p>
                 </div>
               </div>
             </div>
 
             {/* Quick Stats */}
-            <div className="hidden xl:flex items-center space-x-2 text-xs font-mono">
-              <div className="px-2.5 py-1 rounded-lg bg-black/5 dark:bg-white/5 border border-black/5 dark:border-white/10 flex items-center space-x-1.5">
-                <span className="w-2 h-2 rounded-full bg-slate-400" />
+            <div className="hidden lg:flex items-center gap-1.5 text-xs font-mono shrink-0 flex-wrap">
+              <div className="px-2.5 py-1 rounded-lg bg-black/5 dark:bg-white/5 border border-black/5 dark:border-white/10 flex items-center space-x-1.5 whitespace-nowrap shrink-0">
+                <span className="w-2 h-2 rounded-full bg-slate-400 shrink-0" />
                 <span className="text-slate-500 dark:text-slate-400">Posições:</span>
                 <strong className="font-bold">
                   {streetStats.grandTotalSlots.toLocaleString('pt-BR')}
                 </strong>
               </div>
-              <div className="px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center space-x-1.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-500" />
+              <div className="px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center space-x-1.5 whitespace-nowrap shrink-0">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
                 <span className="text-emerald-600 dark:text-emerald-400">Ocupados:</span>
                 <strong className="font-bold text-emerald-600 dark:text-emerald-300">
                   {streetStats.grandOccupiedSlots.toLocaleString('pt-BR')}
                 </strong>
               </div>
-              <div className="px-2.5 py-1 rounded-lg bg-mac-blue/10 border border-mac-blue/30 flex items-center space-x-1.5">
-                <span className="w-2 h-2 rounded-full bg-mac-blue" />
+              <div className="px-2.5 py-1 rounded-lg bg-mac-blue/10 border border-mac-blue/30 flex items-center space-x-1.5 whitespace-nowrap shrink-0">
+                <span className="w-2 h-2 rounded-full bg-mac-blue shrink-0" />
                 <span className="text-mac-blue">Livres:</span>
                 <strong className="font-bold text-mac-blue">
                   {streetStats.grandFreeSlots.toLocaleString('pt-BR')}
@@ -3605,9 +4069,9 @@ export default function App() {
                   type="button"
                   onClick={() => navigateToConflict()}
                   title="Clique para ir direto ao endereço exato onde o conflito ocorre"
-                  className="px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/40 flex items-center space-x-1.5 transition"
+                  className="px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/40 flex items-center space-x-1.5 transition whitespace-nowrap shrink-0"
                 >
-                  <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" />
+                  <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping shrink-0" />
                   <span className="text-rose-600 dark:text-rose-300 font-semibold">Conflitos:</span>
                   <strong className="font-extrabold text-rose-600 dark:text-rose-300">
                     {conflictAnalysis.allConflictSlots.size}
@@ -3615,17 +4079,10 @@ export default function App() {
                   <span className="text-[10px] bg-rose-500 text-white px-1.5 py-0.2 rounded font-bold">Ir ➜</span>
                 </button>
               )}
-              <div className="px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/40 flex items-center space-x-1.5">
-                <span>⭐</span>
-                <span className="text-amber-600 dark:text-amber-300 font-semibold">
-                  RF • RG • RH:
-                </span>
-                <strong className="font-bold text-amber-600 dark:text-amber-300">Col. 35</strong>
-              </div>
             </div>
 
             {/* Action Toolbar */}
-            <div className="flex items-center space-x-1.5 shrink-0 overflow-x-auto no-scrollbar py-1">
+            <div className="flex items-center space-x-1.5 overflow-x-auto no-scrollbar max-w-full py-0.5">
               <div className="flex bg-black/10 dark:bg-white/10 p-0.5 rounded-lg text-xs items-center gap-0.5 shrink-0">
                 <button
                   type="button"
@@ -3807,11 +4264,37 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => openAllocateOrEditSkuModal(null)}
-                className="px-2.5 py-1.5 rounded-lg bg-mac-blue hover:bg-blue-500 text-white font-semibold text-xs shadow-sm transition flex items-center space-x-1"
+                className="px-2.5 py-1.5 rounded-lg bg-mac-blue hover:bg-blue-500 text-white font-semibold text-xs shadow-sm transition flex items-center space-x-1 shrink-0 whitespace-nowrap"
               >
                 <span>＋</span>
                 <span className="hidden sm:inline">Alocar SKU</span>
               </button>
+
+              {quickAllocatedEntries.length > 0 && (
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => exportQuickMovementCsv()}
+                    className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-sm transition flex items-center space-x-1 shrink-0 whitespace-nowrap"
+                    title="Baixar CSV de movimentação rápida (formato SISPLAN) dos SKUs recém-alocados"
+                  >
+                    <span>⚡</span>
+                    <span className="hidden sm:inline">CSV Mov. Rápida</span>
+                    <span className="px-1.5 py-0.2 rounded-full bg-white/25 text-white font-mono text-[10px] font-extrabold">
+                      {quickAllocatedEntries.length}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={clearQuickAllocationQueue}
+                    className="px-2 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-600 text-rose-700 dark:text-rose-300 hover:text-white border border-rose-500/30 font-bold text-xs shadow-sm transition flex items-center gap-1 shrink-0 whitespace-nowrap"
+                    title="Limpar todos os itens pendentes da fila de CSV de Movimentação Rápida"
+                  >
+                    <span>🧹</span>
+                    <span className="hidden lg:inline">Limpar Fila</span>
+                  </button>
+                </div>
+              )}
 
               <button
                 type="button"
@@ -3923,7 +4406,7 @@ export default function App() {
                       }}
                       title={`${meta.desc} • ${st.pct}% ocupado (${heat.label})`}
                       style={isHeatmapActive ? heat.cardBgStyle : undefined}
-                      className={`mac-card rounded-xl p-2 text-left transition flex flex-col justify-between shrink-0 w-24 sm:w-auto ${
+                      className={`mac-card rounded-xl p-2 text-left transition flex flex-col justify-between shrink-0 min-w-[108px] sm:min-w-0 sm:w-auto ${
                         dragPayload ? 'border-purple-400/50' : ''
                       } ${
                         dragOverKey === `STREET:${rua}` ? 'drop-target-hover' : ''
@@ -3943,9 +4426,9 @@ export default function App() {
                               : ''
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-1">
+                      <div className="flex items-center justify-between gap-1 min-w-0">
                         <span
-                          className={`font-display font-extrabold text-xs ${
+                          className={`font-display font-extrabold text-xs shrink-0 whitespace-nowrap ${
                             isHeatmapActive
                               ? 'text-slate-900 dark:text-white'
                               : isCol35
@@ -3959,7 +4442,7 @@ export default function App() {
                         >
                           {rua} {isCol35 ? '★' : isAcc ? '🧣' : isPul ? '📦' : ''}
                         </span>
-                        <span className="font-mono text-[9px] px-1.5 py-0.5 rounded truncate bg-black/10 dark:bg-white/10 text-slate-500 dark:text-slate-300 font-semibold">
+                        <span className="font-mono text-[9px] px-1.5 py-0.5 rounded truncate min-w-0 bg-black/10 dark:bg-white/10 text-slate-500 dark:text-slate-300 font-semibold">
                           {isHeatmapActive ? `${heat.badgeEmoji} ${st.pct}%` : meta.badge}
                         </span>
                       </div>
@@ -4219,17 +4702,17 @@ export default function App() {
             {sidebarOpenMobile && (
               <div
                 onClick={() => setSidebarOpenMobile(false)}
-                className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 lg:hidden"
+                className="fixed inset-0 bg-black/60 backdrop-blur-sm z-30 lg:hidden"
               />
             )}
             {/* LEFT SIDEBAR */}
             <aside
-              className={`mac-sidebar shrink-0 flex flex-col justify-between p-3.5 pb-20 lg:pb-3.5 overflow-y-auto select-none transition-all duration-300 z-50 ${
+              className={`mac-sidebar shrink-0 flex flex-col justify-between p-3.5 pb-20 lg:pb-3.5 overflow-y-auto select-none transition-all duration-300 ${
                 sidebarOpenMobile
-                  ? 'fixed inset-y-0 left-0 w-76 max-w-[85vw] shadow-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-r border-black/15 dark:border-white/15'
+                  ? 'fixed inset-y-0 left-0 w-76 max-w-[85vw] shadow-2xl z-40 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-r border-black/15 dark:border-white/15'
                   : sidebarCollapsedDesktop
                     ? 'hidden'
-                    : 'hidden lg:flex w-64 xl:w-76'
+                    : 'hidden lg:flex w-64 xl:w-76 z-10'
               }`}
             >
               <div className="space-y-4">
@@ -5585,17 +6068,17 @@ export default function App() {
             {inspectorOpenMobile && (
               <div
                 onClick={() => setInspectorOpenMobile(false)}
-                className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 lg:hidden"
+                className="fixed inset-0 bg-black/60 backdrop-blur-sm z-30 lg:hidden"
               />
             )}
             {/* RIGHT INSPECTOR PANEL */}
             <aside
-              className={`shrink-0 border-l border-black/10 dark:border-white/10 p-3.5 pb-20 lg:pb-3.5 overflow-y-auto flex flex-col justify-between transition-all duration-300 z-50 ${
+              className={`shrink-0 border-l border-black/10 dark:border-white/10 p-3.5 pb-20 lg:pb-3.5 overflow-y-auto flex flex-col justify-between transition-all duration-300 ${
                 inspectorOpenMobile
-                  ? 'fixed inset-y-0 right-0 w-88 max-w-[92vw] shadow-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-l border-black/15 dark:border-white/15'
+                  ? 'fixed inset-y-0 right-0 w-88 max-w-[92vw] shadow-2xl z-40 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-l border-black/15 dark:border-white/15'
                   : inspectorCollapsedDesktop
                     ? 'hidden'
-                    : 'hidden lg:flex w-72 xl:w-88 max-w-[92vw] bg-white/45 dark:bg-black/25'
+                    : 'hidden lg:flex w-72 xl:w-88 max-w-[92vw] bg-white/45 dark:bg-black/25 z-10'
               }`}
             >
               <div className="space-y-4">
@@ -6197,6 +6680,43 @@ export default function App() {
                         <div className="space-y-1.5">
                           <button
                             type="button"
+                            onClick={() => {
+                              const dec = decodeSkuPrefix(activeItem.code);
+                              const codigoBase =
+                                activeItem.codigoBase ||
+                                `${dec.dMarca}${dec.dEtiqueta}${dec.dGrupo}${dec.modelSeq}`;
+                              const colorCode = activeItem.colorCode || dec.colorCode;
+                              const size = activeItem.size || dec.size;
+                              const deposito = activeItem.deposito || '2';
+                              const groupedLocal =
+                                multi.groupedWms || activeItem.rawLocal || activeItem.wms;
+                              const entry: QuickAllocationEntry = {
+                                skuKey: multi.skuKey,
+                                code: activeItem.code,
+                                codigoBase,
+                                colorCode,
+                                size,
+                                deposito,
+                                local: groupedLocal,
+                                name: activeItem.name || dec.autoName,
+                                wms: activeItem.wms,
+                                qty: activeItem.qty || 0,
+                                allocatedAt: new Date().toLocaleTimeString('pt-BR', {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                  second: '2-digit'
+                                })
+                              };
+                              exportQuickMovementCsv([entry], codigoBase);
+                            }}
+                            className="w-full py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow transition flex items-center justify-center gap-1.5"
+                            title="Gerar e baixar CSV de movimentação rápida (SISPLAN: CODIGO;COR;TAMANHO;DEPOSITO;LOCAL) para este SKU"
+                          >
+                            <span>⚡</span>
+                            <span>Exportar CSV de Movimentação</span>
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => openRelocateModalWithSku(activeItem)}
                             className="w-full py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-xs shadow transition"
                           >
@@ -6274,7 +6794,7 @@ export default function App() {
       {/* MOBILE BOTTOM NAVIGATION BAR (TOUCH-OPTIMIZED, LG:HIDDEN)             */}
       {/* ==================================================================== */}
       {!isFullscreen && (
-        <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-t border-black/10 dark:border-white/10 px-2 py-1.5 pb-safe flex items-center justify-around shadow-2xl">
+        <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-t border-black/10 dark:border-white/10 px-2 py-1.5 pb-safe flex items-center justify-around shadow-2xl">
           {/* Tab 1: Ruas e Filtros */}
           <button
             type="button"
@@ -6538,85 +7058,350 @@ export default function App() {
       {/* ==================================================================== */}
       {showSkuModal && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4">
-          <div className="mac-window mac-sheet w-full max-w-lg rounded-2xl overflow-hidden shadow-2xl border border-white/20">
-            <div className="px-4 sm:px-5 py-3 border-b border-black/10 dark:border-white/10 flex items-center justify-between bg-white/30 dark:bg-black/20">
+          <div
+            className={`mac-window mac-sheet w-full rounded-2xl overflow-hidden shadow-2xl border border-white/20 transition-all ${
+              skuModalTab === 'batch' && !skuFormEditId ? 'max-w-3xl' : 'max-w-lg'
+            }`}
+          >
+            <div className="px-4 sm:px-5 py-3 border-b border-black/10 dark:border-white/10 flex flex-wrap items-center justify-between gap-2 bg-white/30 dark:bg-black/20">
               <div className="flex items-center space-x-2">
-                <span>📦</span>
+                <span>{skuModalTab === 'batch' && !skuFormEditId ? '⚡' : '📦'}</span>
                 <h3 className="font-display font-bold text-sm">
-                  {skuFormEditId ? 'Editar SKU no Endereço' : 'Alocar SKU em Endereço WMS'}
+                  {skuFormEditId
+                    ? 'Editar SKU no Endereço'
+                    : skuModalTab === 'batch'
+                      ? 'Importação Rápida de Lista de SKUs'
+                      : 'Alocar SKU em Endereço WMS'}
                 </h3>
               </div>
-              <button
-                type="button"
-                onClick={() => setShowSkuModal(false)}
-                className="text-slate-400 hover:text-slate-200 text-sm"
-              >
-                ✕
-              </button>
+
+              <div className="flex items-center gap-2">
+                {!skuFormEditId && (
+                  <div className="flex bg-black/10 dark:bg-white/10 p-0.5 rounded-lg text-[11px] font-bold">
+                    <button
+                      type="button"
+                      onClick={() => setSkuModalTab('single')}
+                      className={`px-2.5 py-1 rounded-md transition ${
+                        skuModalTab === 'single'
+                          ? 'bg-mac-blue text-white shadow'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-black/5 dark:hover:bg-white/10'
+                      }`}
+                    >
+                      📦 Individual
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSkuModalTab('batch')}
+                      className={`px-2.5 py-1 rounded-md transition ${
+                        skuModalTab === 'batch'
+                          ? 'bg-emerald-600 text-white shadow'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-black/5 dark:hover:bg-white/10'
+                      }`}
+                    >
+                      ⚡ Lista Rápida
+                    </button>
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => setShowSkuModal(false)}
+                  className="text-slate-400 hover:text-slate-200 text-sm px-1"
+                >
+                  ✕
+                </button>
+              </div>
             </div>
 
+            {skuModalTab === 'batch' && !skuFormEditId ? (
+              <div className="p-3.5 sm:p-5 space-y-3 text-xs max-h-[88dvh] overflow-y-auto">
+                <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <label className="text-[11px] font-bold text-emerald-700 dark:text-emerald-300">
+                      📋 Cole a lista de SKUs (separados por espaço, linha ou ponto-e-vírgula):
+                    </label>
+                    {batchSkuInputText.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBatchSkuInputText('');
+                          setBatchManualPosOverrides({});
+                          setBatchRemovedKeys(new Set());
+                        }}
+                        className="text-[10px] font-bold px-2 py-0.5 rounded bg-black/10 dark:bg-white/10 hover:bg-rose-500 hover:text-white transition"
+                      >
+                        Limpar Texto
+                      </button>
+                    )}
+                  </div>
+                  <textarea
+                    rows={3}
+                    value={batchSkuInputText}
+                    onChange={e => {
+                      setBatchSkuInputText(e.target.value);
+                      setBatchRemovedKeys(new Set());
+                    }}
+                    placeholder="Ex: 12180002 - 203 - M 13060013 - 109 - 12 13060059 - 409 - 10 21060002 - 402 - G..."
+                    className="w-full px-3 py-2 rounded-xl bg-white/90 dark:bg-slate-900 border border-emerald-500/30 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                    Cada SKU reconhecido no padrão <span className="font-mono font-bold">8 dígitos - 3 dígitos - Tamanho</span> recebe automaticamente uma <strong>Torre Livre Sugerida</strong> na rua selecionada.
+                  </p>
+                </div>
+
+                {/* Configurações de Alocação do Lote */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 p-3 rounded-xl bg-mac-blue/10 border border-mac-blue/30">
+                  <div>
+                    <label className="block text-[10px] font-semibold mb-1 text-slate-500 dark:text-slate-300">
+                      Rua de Destino
+                    </label>
+                    <select
+                      value={batchTargetRua}
+                      onChange={e => {
+                        setBatchTargetRua(e.target.value);
+                        setBatchManualPosOverrides({});
+                      }}
+                      className="w-full px-2 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-black/10 dark:border-white/15 font-mono font-bold text-[11px]"
+                    >
+                      {STREETS.map(r => (
+                        <option key={r} value={r}>
+                          Rua {r} ({STREET_META[r].badge})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold mb-1 text-slate-500 dark:text-slate-300">
+                      A partir da Torre
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={175}
+                      value={batchStartPos}
+                      onChange={e => {
+                        setBatchStartPos(parseInt(e.target.value, 10) || 1);
+                        setBatchManualPosOverrides({});
+                      }}
+                      className="w-full px-2 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-black/10 dark:border-white/15 font-mono font-bold text-[11px]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold mb-1 text-slate-500 dark:text-slate-300">
+                      Níveis / SKU
+                    </label>
+                    <select
+                      value={batchLevelsPerSku}
+                      onChange={e => setBatchLevelsPerSku(parseInt(e.target.value, 10) || 1)}
+                      className="w-full px-2 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-black/10 dark:border-white/15 font-mono font-bold text-[11px]"
+                    >
+                      {[1, 2, 3, 4, 5, 6].map(n => (
+                        <option key={n} value={n}>
+                          {n} {n === 1 ? 'nível' : 'níveis'}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold mb-1 text-slate-500 dark:text-slate-300">
+                      Qtd Padrão (pçs)
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={batchDefaultQty}
+                      onChange={e => setBatchDefaultQty(parseInt(e.target.value, 10) || 1)}
+                      className="w-full px-2 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-black/10 dark:border-white/15 font-mono font-bold text-[11px]"
+                    />
+                  </div>
+                  <label className="col-span-2 sm:col-span-4 flex items-center gap-2 pt-1 text-[11px] font-medium cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={batchPreferEmptyTowers}
+                      onChange={e => setBatchPreferEmptyTowers(e.target.checked)}
+                      className="rounded border-slate-400 text-mac-blue focus:ring-mac-blue"
+                    />
+                    <span>Priorizar torres 100% vazias antes de usar níveis livres em torres parcialmente ocupadas</span>
+                  </label>
+                </div>
+
+                {/* Avisos de fragmentos não reconhecidos / duplicados */}
+                {(batchQuickPlan.invalidFragments.length > 0 || batchQuickPlan.duplicateCount > 0) && (
+                  <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-800 dark:text-amber-200 space-y-1">
+                    {batchQuickPlan.duplicateCount > 0 && (
+                      <p>ℹ️ {batchQuickPlan.duplicateCount} SKU(s) duplicado(s) na lista foram consolidados.</p>
+                    )}
+                    {batchQuickPlan.invalidFragments.length > 0 && (
+                      <p className="font-mono text-[10px]">
+                        ⚠️ Trechos fora do padrão SKU ignorados: {batchQuickPlan.invalidFragments.slice(0, 5).join(' | ')}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* Tabela Preview SKU -> Torre Livre Sugerida */}
+                <div className="rounded-xl border border-black/10 dark:border-white/15 overflow-hidden">
+                  <div className="px-3 py-2 bg-black/5 dark:bg-white/5 border-b border-black/10 dark:border-white/10 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                    <span className="font-bold">
+                      Prévia do Mapeamento ({batchQuickPlan.assignableCount} de {batchQuickPlan.assignments.length} SKU(s) com torre sugerida)
+                    </span>
+                    <span className="font-mono text-[10px] text-slate-500 dark:text-slate-400">
+                      Rua {batchTargetRua} • Col. {isReservedCol35Street(batchTargetRua) ? '35' : '51'}
+                    </span>
+                  </div>
+
+                  {batchQuickPlan.assignments.length === 0 ? (
+                    <div className="p-6 text-center text-slate-400 text-xs">
+                      Cole os códigos SKU acima para visualizar a separação automática e as torres livres sugeridas.
+                    </div>
+                  ) : (
+                    <div className="max-h-60 overflow-y-auto divide-y divide-black/5 dark:divide-white/5">
+                      {batchQuickPlan.assignments.map((row, idx) => (
+                        <div
+                          key={row.skuKey}
+                          className="px-3 py-2 flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+                        >
+                          <div className="min-w-0 flex-1 space-y-0.5">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="font-mono text-[10px] text-slate-400 w-5 shrink-0">
+                                #{idx + 1}
+                              </span>
+                              <span
+                                className="w-2.5 h-2.5 rounded-full border border-black/25 shrink-0"
+                                style={{ backgroundColor: row.dec.colorHex }}
+                              />
+                              <span className="font-mono font-extrabold text-xs">
+                                {row.normalizedCode}
+                              </span>
+                            </div>
+                            <p className="text-[10px] text-slate-500 dark:text-slate-400 truncate pl-6">
+                              {row.dec.icon} {row.dec.autoName}
+                            </p>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <span className="text-slate-400 text-[11px]">➔</span>
+                            {row.pos !== null ? (
+                              <span
+                                className={`px-2 py-0.5 rounded-lg font-mono text-[11px] font-bold border ${
+                                  row.isCompletelyEmptyTower
+                                    ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+                                    : 'bg-mac-blue/15 text-mac-blue border-mac-blue/30'
+                                }`}
+                                title={
+                                  row.isCompletelyEmptyTower
+                                    ? 'Torre 100% vazia sugerida'
+                                    : 'Torre parcialmente ocupada com níveis livres'
+                                }
+                              >
+                                {row.groupedLocal}
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-lg bg-rose-500/15 text-rose-600 dark:text-rose-300 font-bold text-[10px] border border-rose-500/30">
+                                {row.error || 'Sem vaga'}
+                              </span>
+                            )}
+                            <input
+                              type="number"
+                              min={1}
+                              max={175}
+                              value={batchManualPosOverrides[row.skuKey] ?? row.pos ?? ''}
+                              onChange={e => {
+                                const val = parseInt(e.target.value, 10);
+                                setBatchManualPosOverrides(prev => {
+                                  const next = { ...prev };
+                                  if (!val || Number.isNaN(val)) {
+                                    delete next[row.skuKey];
+                                  } else {
+                                    next[row.skuKey] = val;
+                                  }
+                                  return next;
+                                });
+                              }}
+                              title="Editar número da torre manualmente (opcional)"
+                              className="w-14 px-1.5 py-0.5 rounded-md bg-black/5 dark:bg-white/10 border border-black/10 dark:border-white/15 font-mono text-[10px] text-center font-bold"
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setBatchRemovedKeys(prev => {
+                                  const next = new Set(prev);
+                                  next.add(row.skuKey);
+                                  return next;
+                                })
+                              }
+                              className="p-1 rounded-md text-slate-400 hover:text-rose-500 hover:bg-rose-500/10 transition"
+                              title="Remover este SKU da importação rápida"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="pt-2.5 border-t border-black/10 dark:border-white/10 space-y-2">
+                  {quickAllocatedEntries.length > 0 && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-[11px]">
+                      <span className="text-emerald-700 dark:text-emerald-300 font-medium">
+                        ⚡ Fila de Movimentação Rápida: <strong>{quickAllocatedEntries.length}</strong> SKU(s) pronto(s)
+                      </span>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={clearQuickAllocationQueue}
+                          className="px-2 py-0.5 rounded-lg bg-rose-500/15 hover:bg-rose-600 text-rose-700 dark:text-rose-300 hover:text-white border border-rose-500/30 font-bold text-[10px] transition shrink-0"
+                        >
+                          🧹 Limpar Fila
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => exportQuickMovementCsv()}
+                          className="px-2 py-0.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] transition shrink-0"
+                        >
+                          📤 Baixar Todos ({quickAllocatedEntries.length})
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowSkuModal(false)}
+                      className="px-4 py-2 rounded-xl bg-black/5 dark:bg-white/10 font-medium"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleBatchQuickAllocate(true)}
+                      disabled={batchQuickPlan.assignableCount === 0}
+                      className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-bold shadow-lg transition flex items-center gap-1.5"
+                      title="Aloca todos os SKUs da lista nas torres livres sugeridas e baixa o CSV no formato SISPLAN"
+                    >
+                      <span>⚡</span>
+                      <span>Alocar Lista + Baixar CSV Rápido ({batchQuickPlan.assignableCount})</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleBatchQuickAllocate(false)}
+                      disabled={batchQuickPlan.assignableCount === 0}
+                      className="px-5 py-2 rounded-xl bg-mac-blue hover:bg-blue-500 disabled:opacity-40 text-white font-semibold shadow-lg transition"
+                    >
+                      Alocar Lista no Mapa
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
             <form
+              noValidate
               onSubmit={e => {
                 e.preventDefault();
-                if (!isValidPositionInStreet(skuFormRua, skuFormPos)) {
-                  playMacSound('alert', soundEnabled);
-                  showToast(
-                    `Torre ${skuFormPos} Inválida na Rua ${skuFormRua}!`,
-                    getStreetPositionRuleDescription(skuFormRua),
-                    '🚨'
-                  );
-                  return;
-                }
-                const parsedSubmit = parseFullSkuString(skuFormCode);
-                const dec = decodeSkuPrefix(skuFormCode, skuFormColor, skuFormSize);
-                const finalCode = parsedSubmit.isComplete
-                  ? `${parsedSubmit.dMarca}${parsedSubmit.dEtiqueta}${parsedSubmit.dGrupo}${parsedSubmit.modelSeq} - ${parsedSubmit.colorCode} - ${parsedSubmit.size}`
-                  : skuFormCode.trim().toUpperCase();
-                const finalName = skuFormName.trim() || dec.autoName;
-                const groupedLocal = formatLevelsToSisplanLocal(
-                  skuFormRua,
-                  skuFormPos,
-                  skuFormSelectedLevels
-                );
-                const skuKey = getCanonicalSkuKey(finalCode);
-                const filtered = skus.filter(
-                  s => getCanonicalSkuKey(s.code) !== skuKey && s.id !== skuFormEditId
-                );
-
-                const created: SkuItem[] = skuFormSelectedLevels.map((lv, idx) => ({
-                  id: idx === 0 && skuFormEditId ? skuFormEditId : `sku-${Date.now()}-${lv}-${idx}`,
-                  code: finalCode,
-                  codigoBase: dec.dMarca + dec.dEtiqueta + dec.dGrupo + dec.modelSeq,
-                  name: finalName,
-                  brand: dec.marca,
-                  label: dec.etiqueta,
-                  groupCode: dec.dGrupo,
-                  groupName: dec.grupo,
-                  colorCode: dec.colorCode,
-                  colorName: dec.colorName,
-                  colorHex: dec.colorHex,
-                  size: dec.size,
-                  deposito: skuFormDeposito || '2',
-                  rua: skuFormRua,
-                  pos: skuFormPos,
-                  nivel: lv,
-                  wms: formatWmsAddress(skuFormRua, skuFormPos, lv),
-                  rawLocal: groupedLocal,
-                  colecao: skuFormColecao,
-                  qty: skuFormQty,
-                  icon: dec.icon
-                }));
-
-                const nextSkus = [...created, ...filtered];
-                setSkus(nextSkus);
-                selectStreet(skuFormRua);
-                setSelectedAddressKey(created[0].wms);
-                setSelectedSkuId(created[0].id);
-                persistCurrentState(nextSkus, movedSkusRegistry, transbordoRegistry);
-                setShowSkuModal(false);
-                scrollToWmsSlot(created[0].wms, skuFormRua, skuFormPos);
-                playMacSound('success', soundEnabled);
-                showToast('SKU Alocado no Mapa', `${finalCode} salvo em ${groupedLocal}`, '🏢');
+                handleSubmitAllocateSku(false);
               }}
               className="p-3.5 sm:p-5 space-y-3 text-xs max-h-[88dvh] overflow-y-auto"
             >
@@ -6729,7 +7514,11 @@ export default function App() {
                     value={skuFormCode}
                     onChange={e => syncSkuFormFromFullCode(e.target.value)}
                     placeholder="Ex: 11060127 - 102 - M ou 11060127102M"
-                    className="w-full px-3 py-2 rounded-xl bg-black/5 dark:bg-white/10 border border-black/10 dark:border-white/15 font-mono font-bold focus:outline-none focus:ring-2 focus:ring-mac-blue"
+                    className={`w-full px-3 py-2 rounded-xl bg-black/5 dark:bg-white/10 border font-mono font-bold focus:outline-none focus:ring-2 ${
+                      skuFormSubmitAttempted && !validateSkuNamingPattern(skuFormCode).isValid
+                        ? 'border-rose-500 ring-1 ring-rose-500/40 focus:ring-rose-500'
+                        : 'border-black/10 dark:border-white/15 focus:ring-mac-blue'
+                    }`}
                   />
                 </div>
                 <div>
@@ -6745,6 +7534,88 @@ export default function App() {
                   />
                 </div>
               </div>
+
+              {/* Validação do Padrão de Nomenclatura (8 dígitos base - 3 dígitos cor - Tamanho) */}
+              {(() => {
+                const liveValidation = validateSkuAllocationForm();
+                const hasInput = skuFormCode.trim().length > 0;
+                const activeErrors = skuFormSubmitAttempted ? liveValidation.errors : [];
+                const showErrorState =
+                  activeErrors.length > 0 || (hasInput && !(liveValidation.isBaseValid && liveValidation.isColorValid && liveValidation.isSizeValid));
+                return (
+                  <div
+                    className={`p-2.5 rounded-xl border text-[11px] space-y-1.5 transition ${
+                      liveValidation.isValid
+                        ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+                        : showErrorState
+                          ? 'bg-rose-500/10 border-rose-500/40 text-rose-700 dark:text-rose-300'
+                          : 'bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-slate-600 dark:text-slate-300'
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-1.5">
+                      <span className="font-bold flex items-center gap-1">
+                        <span>
+                          {liveValidation.isValid
+                            ? '✅'
+                            : showErrorState
+                              ? '🚨'
+                              : '📐'}
+                        </span>
+                        <span>
+                          {liveValidation.isValid
+                            ? `Padrão válido: ${liveValidation.normalizedCode}`
+                            : 'Validação de Nomenclatura SKU'}
+                        </span>
+                      </span>
+                      <div className="flex flex-wrap items-center gap-1 font-mono text-[10px]">
+                        <span
+                          className={`px-1.5 py-0.5 rounded font-bold ${
+                            liveValidation.isBaseValid
+                              ? 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-300'
+                              : 'bg-black/10 dark:bg-white/10 opacity-80'
+                          }`}
+                        >
+                          {liveValidation.isBaseValid ? '✓' : '•'} Base (8 díg.)
+                        </span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded font-bold ${
+                            liveValidation.isColorValid
+                              ? 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-300'
+                              : 'bg-black/10 dark:bg-white/10 opacity-80'
+                          }`}
+                        >
+                          {liveValidation.isColorValid ? '✓' : '•'} Cor (3 díg.)
+                        </span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded font-bold ${
+                            liveValidation.isSizeValid
+                              ? 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-300'
+                              : 'bg-black/10 dark:bg-white/10 opacity-80'
+                          }`}
+                        >
+                          {liveValidation.isSizeValid ? '✓' : '•'} Tam.
+                        </span>
+                      </div>
+                    </div>
+
+                    {activeErrors.length > 0 ? (
+                      <ul className="list-disc list-inside space-y-0.5 text-[10px] font-semibold">
+                        {activeErrors.map((err, i) => (
+                          <li key={i}>{err}</li>
+                        ))}
+                      </ul>
+                    ) : hasInput && liveValidation.errors.length > 0 ? (
+                      <p className="text-[10px] font-medium">
+                        {liveValidation.errors[0]}
+                      </p>
+                    ) : liveValidation.isValid && liveValidation.warnings.length > 0 ? (
+                      <p className="text-[10px] text-amber-600 dark:text-amber-300 font-medium">
+                        ℹ️ {liveValidation.warnings[0]}
+                      </p>
+                    ) : null}
+                  </div>
+                );
+              })()}
 
               {/* Descrição do Produto (Auto-gerada pelo código) + Preview */}
               {(() => {
@@ -6895,22 +7766,59 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="flex justify-end space-x-2 pt-2 border-t border-black/10 dark:border-white/10">
-                <button
-                  type="button"
-                  onClick={() => setShowSkuModal(false)}
-                  className="px-4 py-2 rounded-xl bg-black/5 dark:bg-white/10 font-medium"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 rounded-xl bg-mac-blue hover:bg-blue-500 text-white font-semibold shadow-lg transition"
-                >
-                  Salvar no Endereço
-                </button>
+              <div className="pt-2.5 border-t border-black/10 dark:border-white/10 space-y-2">
+                {quickAllocatedEntries.length > 0 && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-[11px]">
+                    <span className="text-emerald-700 dark:text-emerald-300 font-medium">
+                      ⚡ Fila de Movimentação Rápida: <strong>{quickAllocatedEntries.length}</strong> SKU(s) pronto(s)
+                    </span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={clearQuickAllocationQueue}
+                        className="px-2 py-0.5 rounded-lg bg-rose-500/15 hover:bg-rose-600 text-rose-700 dark:text-rose-300 hover:text-white border border-rose-500/30 font-bold text-[10px] transition shrink-0"
+                      >
+                        🧹 Limpar Fila
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => exportQuickMovementCsv()}
+                        className="px-2 py-0.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] transition shrink-0"
+                      >
+                        📤 Baixar Todos ({quickAllocatedEntries.length})
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex flex-wrap justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowSkuModal(false)}
+                    className="px-4 py-2 rounded-xl bg-black/5 dark:bg-white/10 font-medium"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSubmitAllocateSku(true)}
+                    disabled={!skuFormCode.trim()}
+                    className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-bold shadow-lg transition flex items-center gap-1.5"
+                    title="Salva no mapa e baixa imediatamente o CSV no formato SISPLAN (CODIGO;COR;TAMANHO;DEPOSITO;LOCAL)"
+                  >
+                    <span>⚡</span>
+                    <span>Salvar + Baixar CSV Rápido</span>
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2 rounded-xl bg-mac-blue hover:bg-blue-500 text-white font-semibold shadow-lg transition"
+                  >
+                    Salvar no Endereço
+                  </button>
+                </div>
               </div>
             </form>
+            )}
           </div>
         </div>
       )}
@@ -7524,7 +8432,7 @@ export default function App() {
       {/* TOAST NOTIFICATION                                                   */}
       {/* ==================================================================== */}
       <div
-        className={`fixed top-10 right-4 z-50 transition-all duration-300 pointer-events-none ${
+        className={`fixed top-10 right-4 z-[95] transition-all duration-300 pointer-events-none ${
           toast.visible ? 'translate-x-0 opacity-100' : 'translate-x-8 opacity-0'
         }`}
       >
