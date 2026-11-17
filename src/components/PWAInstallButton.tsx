@@ -79,45 +79,68 @@ interface OfflineSyncBannerProps {
   isOnline: boolean;
   pendingCount: number;
   isSyncing: boolean;
+  conflictsCount?: number;
   onSyncNow: () => void;
+  onOpenConflicts?: () => void;
 }
 
 export const OfflineSyncBanner: React.FC<OfflineSyncBannerProps> = ({
   isOnline,
   pendingCount,
   isSyncing,
+  conflictsCount = 0,
   onSyncNow,
+  onOpenConflicts
 }) => {
-  if (isOnline && pendingCount === 0 && !isSyncing) {
+  if (isOnline && pendingCount === 0 && !isSyncing && conflictsCount === 0) {
     return null;
   }
 
   return (
     <div
       className={`fixed bottom-16 lg:bottom-9 left-3 sm:left-4 z-30 flex flex-wrap items-center gap-2 rounded-xl px-3 py-1.5 text-[11px] font-bold shadow-xl border backdrop-blur-md transition-all ${
-        !isOnline
-          ? 'bg-amber-500/95 text-slate-950 border-amber-300'
-          : isSyncing
-            ? 'bg-mac-blue/95 text-white border-blue-300'
-            : 'bg-emerald-600/95 text-white border-emerald-400'
+        conflictsCount > 0
+          ? 'bg-rose-600/95 text-white border-rose-300'
+          : !isOnline
+            ? 'bg-amber-500/95 text-slate-950 border-amber-300'
+            : isSyncing
+              ? 'bg-mac-blue/95 text-white border-blue-300'
+              : 'bg-emerald-600/95 text-white border-emerald-400'
       }`}
     >
       <span
         className={`h-2 w-2 rounded-full shrink-0 ${
-          !isOnline
-            ? 'bg-slate-950 animate-pulse'
-            : isSyncing
-              ? 'bg-white animate-ping'
-              : 'bg-white'
+          conflictsCount > 0
+            ? 'bg-white animate-pulse'
+            : !isOnline
+              ? 'bg-slate-950 animate-pulse'
+              : isSyncing
+                ? 'bg-white animate-ping'
+                : 'bg-white'
         }`}
       />
-      {!isOnline ? (
+      {conflictsCount > 0 ? (
+        <>
+          <span>
+            ⚔️ {conflictsCount} conflito(s) de endereço entre dispositivos (protegido contra duplicação)
+          </span>
+          {onOpenConflicts && (
+            <button
+              type="button"
+              onClick={onOpenConflicts}
+              className="px-2 py-0.5 rounded-lg bg-white text-rose-700 hover:bg-rose-50 font-extrabold text-[10px] transition shadow-sm"
+            >
+              Resolver Conflitos
+            </button>
+          )}
+        </>
+      ) : !isOnline ? (
         <span>
           Modo Offline — Mapa salvo localmente
           {pendingCount > 0 ? ` (${pendingCount} alteração(ões) pendente(s) p/ sincronizar)` : ''}
         </span>
       ) : isSyncing ? (
-        <span>Sincronizando alterações offline ({pendingCount})...</span>
+        <span>Mesclando e sincronizando alterações offline ({pendingCount})...</span>
       ) : (
         <>
           <span>Conexão ativa — {pendingCount} alteração(ões) aguardando envio</span>

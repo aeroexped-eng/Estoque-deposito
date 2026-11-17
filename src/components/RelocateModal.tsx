@@ -16,7 +16,7 @@ import {
   decodeSkuPrefix,
   pickBestLevelsInColumn
 } from '../constants/wmsConstants';
-import { playMacSound, triggerCsvDownload } from '../utils/storageAndSync';
+import { playMacSound, triggerCsvDownload, deduplicateSkuItems } from '../utils/storageAndSync';
 
 export interface RelocateModalProps {
   isOpen: boolean;
@@ -557,36 +557,38 @@ export const RelocateModal: React.FC<RelocateModalProps> = ({
       return;
     }
 
-    const itemsToMoveMap = new Map<string, BatchAllocatedItem>();
+    const movedSiblingIds = new Set<string>();
+    const relocatedItems: SkuItem[] = [];
+
     for (const plan of batchAllocationPlan) {
-      for (const sib of plan.allSiblingItems) {
-        itemsToMoveMap.set(sib.id, plan);
-      }
-    }
-
-    let curMoved = { ...movedSkusRegistry };
-
-    // Update SKUs array
-    const nextSkus = skus.map(item => {
-      const plan = itemsToMoveMap.get(item.id);
-      if (!plan) return item;
-
-      const sibIndex = plan.allSiblingItems.findIndex(s => s.id === item.id);
-      const lv = plan.targetLevels[sibIndex] || plan.targetLevels[0] || 1;
-      const newWms = formatWmsAddress(plan.targetRua, plan.targetPos, lv);
+      const uniqueLevels = Array.from(new Set(plan.targetLevels)).sort((a, b) => a - b);
       const isReserved35 = isReservedCol35Street(plan.targetRua);
 
-      return {
-        ...item,
-        lastRelocatedFrom: item.wms,
-        rua: plan.targetRua,
-        pos: plan.targetPos,
-        nivel: lv,
-        wms: newWms,
-        rawLocal: plan.targetSisplanLocal,
-        colecao: isReserved35 ? '35' : item.colecao
-      };
-    });
+      for (const sib of plan.allSiblingItems) {
+        movedSiblingIds.add(sib.id);
+      }
+
+      uniqueLevels.forEach((lv, idx) => {
+        const template = plan.allSiblingItems[idx] || plan.primarySku;
+        const newWms = formatWmsAddress(plan.targetRua, plan.targetPos, lv);
+        relocatedItems.push({
+          ...template,
+          id: idx < plan.allSiblingItems.length ? template.id : `sku-batch-rel-${Date.now()}-${lv}-${idx}`,
+          lastRelocatedFrom: template.wms,
+          rua: plan.targetRua,
+          pos: plan.targetPos,
+          nivel: lv,
+          wms: newWms,
+          rawLocal: plan.targetSisplanLocal,
+          colecao: isReserved35 ? '35' : template.colecao
+        });
+      });
+    }
+
+    const untouchedSkus = skus.filter(item => !movedSiblingIds.has(item.id));
+    const nextSkus = deduplicateSkuItems([...relocatedItems, ...untouchedSkus]).items;
+
+    let curMoved = { ...movedSkusRegistry };
 
     // Record every SKU in movedSkusRegistry
     for (const plan of batchAllocationPlan) {
@@ -788,10 +790,11 @@ export const RelocateModal: React.FC<RelocateModalProps> = ({
                 }
 
                 const multi = currentSingleMulti || getSkuMultiLevelInfo(currentSelectedSingleSku);
-                const levelsToUse =
+                const rawLevelsToUse =
                   singleMoveAllLevels && singleSelectedLevels.length > 0
                     ? singleSelectedLevels
                     : [singleNewNivel];
+                const levelsToUse = Array.from(new Set(rawLevelsToUse)).sort((a, b) => a - b);
 
                 const newRawLocal = formatLevelsToSisplanLocal(
                   singleNewRua,
@@ -799,23 +802,33 @@ export const RelocateModal: React.FC<RelocateModalProps> = ({
                   levelsToUse
                 );
                 const oldRaw = currentSelectedSingleSku.rawLocal || currentSelectedSingleSku.wms;
-                const sibIds = new Set(multi.siblingItems.map(s => s.id));
 
-                const nextSkus = skus.map(item => {
-                  if (!sibIds.has(item.id)) return item;
-                  const idx = multi.siblingItems.findIndex(s => s.id === item.id);
-                  const lv = levelsToUse[idx] || levelsToUse[0];
+                // Se moveu todos os níveis ou consolidou o SKU, substitui todos os irmãos sem nunca duplicar no mesmo WMS
+                const idsToReplace = singleMoveAllLevels
+                  ? new Set(multi.siblingItems.map(s => s.id))
+                  : new Set([currentSelectedSingleSku.id]);
+
+                const preservedOthers = skus.filter(item => !idsToReplace.has(item.id));
+                const isReserved35 = isReservedCol35Street(singleNewRua);
+
+                const relocatedRecords: SkuItem[] = levelsToUse.map((lv, idx) => {
+                  const sourceSib = singleMoveAllLevels
+                    ? multi.siblingItems[idx] || currentSelectedSingleSku
+                    : currentSelectedSingleSku;
                   return {
-                    ...item,
-                    lastRelocatedFrom: item.wms,
+                    ...sourceSib,
+                    id: idx === 0 ? currentSelectedSingleSku.id : `sku-rel-${Date.now()}-${lv}-${idx}`,
+                    lastRelocatedFrom: sourceSib.wms,
                     rua: singleNewRua,
                     pos: singleNewPos,
                     nivel: lv,
                     wms: formatWmsAddress(singleNewRua, singleNewPos, lv),
                     rawLocal: newRawLocal,
-                    colecao: isReservedCol35Street(singleNewRua) ? '35' : item.colecao
+                    colecao: isReserved35 ? '35' : sourceSib.colecao
                   };
                 });
+
+                const nextSkus = deduplicateSkuItems([...relocatedRecords, ...preservedOthers]).items;
 
                 const { nextMoved } = recordSkuMoved(
                   currentSelectedSingleSku,

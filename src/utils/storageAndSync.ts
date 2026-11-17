@@ -219,6 +219,46 @@ export interface ParsedCsvResult {
   firstId: string | null;
 }
 
+/**
+ * Garante que nunca existam registros duplicados para o mesmo SKU no mesmo endereço WMS
+ * (ou registros de Pulmão duplicados no mesmo slot). Mantém apenas 1 entrada canônica por SKU@@WMS.
+ */
+export function deduplicateSkuItems(items: SkuItem[]): {
+  items: SkuItem[];
+  removedDuplicatesCount: number;
+} {
+  const seen = new Map<string, SkuItem>();
+  let removedDuplicatesCount = 0;
+
+  for (const item of items) {
+    if (!item || !item.wms) continue;
+    const isPulmaoItem =
+      item.codigoBase === 'PULMAO' || String(item.code || '').toUpperCase().startsWith('PULMAO-');
+    const skuPart = isPulmaoItem ? `PULMAO` : getCanonicalSkuKey(item.code);
+    const dedupeKey = `${skuPart}@@${item.wms.toUpperCase()}`;
+
+    const existing = seen.get(dedupeKey);
+    if (existing) {
+      removedDuplicatesCount++;
+      const nextQty = Math.max(existing.qty || 0, typeof item.qty === 'number' ? item.qty : 0);
+      seen.set(dedupeKey, {
+        ...existing,
+        ...item,
+        id: existing.id || item.id,
+        qty: nextQty,
+        name: item.name || existing.name
+      });
+    } else {
+      seen.set(dedupeKey, { ...item });
+    }
+  }
+
+  return {
+    items: Array.from(seen.values()),
+    removedDuplicatesCount
+  };
+}
+
 export function parseCsvData(
   rawText: string,
   existingSkus: SkuItem[] = [],
@@ -664,17 +704,7 @@ export function parseCsvData(
 
   let finalSkus: SkuItem[] = [];
   if (mode === 'replace') {
-    const dedupSkuMap = new Map<string, SkuItem>();
-    for (const item of importedItems) {
-      const key = `${getCanonicalSkuKey(item.code)}@@${item.wms}`;
-      const existing = dedupSkuMap.get(key);
-      if (existing) {
-        existing.qty = (existing.qty || 0) + (typeof item.qty === 'number' ? item.qty : 0);
-      } else {
-        dedupSkuMap.set(key, { ...item });
-      }
-    }
-    finalSkus = Array.from(dedupSkuMap.values());
+    finalSkus = deduplicateSkuItems(importedItems).items;
   } else {
     const mergedMap = new Map<string, SkuItem>();
     for (const existing of existingSkus) {
@@ -683,22 +713,12 @@ export function parseCsvData(
     for (const item of importedItems) {
       mergedMap.set(`${getCanonicalSkuKey(item.code)}@@${item.wms}`, item);
     }
-    finalSkus = Array.from(mergedMap.values());
+    finalSkus = deduplicateSkuItems(Array.from(mergedMap.values())).items;
   }
 
   let finalBarra: SkuItem[] = [];
   if (mode === 'replace') {
-    const dedupBarraMap = new Map<string, SkuItem>();
-    for (const bItem of importedBarraItems) {
-      const key = `${getCanonicalSkuKey(bItem.code)}@@${bItem.wms}`;
-      const existing = dedupBarraMap.get(key);
-      if (existing) {
-        existing.qty = (existing.qty || 0) + (typeof bItem.qty === 'number' ? bItem.qty : 0);
-      } else {
-        dedupBarraMap.set(key, { ...bItem });
-      }
-    }
-    finalBarra = Array.from(dedupBarraMap.values());
+    finalBarra = deduplicateSkuItems(importedBarraItems).items;
   } else {
     const barraMap = new Map<string, SkuItem>();
     for (const existing of existingBarraItems) {
@@ -715,10 +735,10 @@ export function parseCsvData(
         barraMap.set(key, { ...bItem });
       }
     }
-    finalBarra = Array.from(barraMap.values());
+    finalBarra = deduplicateSkuItems(Array.from(barraMap.values())).items;
   }
 
-  const first = importedItems[0] || importedBarraItems[0] || null;
+  const first = finalSkus[0] || finalBarra[0] || null;
   return {
     skus: finalSkus,
     barraItems: finalBarra,
@@ -790,19 +810,29 @@ export function buildSisplanCsvString(
   }
 
   for (const group of skuMap.values()) {
-    // 1. Constrói LOCAL_CADASTRO agrupando colunas (ex: RF.029.1 - 6)
+    // 1. Constrói LOCAL_CADASTRO agrupando colunas sem níveis duplicados (ex: RF.029.1 - 6)
     const colGrouped = new Map<string, { rua: string; pos: number; levels: number[] }>();
+    const seenWmsInGroup = new Set<string>();
+    const uniqueGroupItems: SkuItem[] = [];
     for (const item of group.items) {
+      const wmsUpper = String(item.wms || '').toUpperCase();
+      if (seenWmsInGroup.has(wmsUpper)) continue;
+      seenWmsInGroup.add(wmsUpper);
+      uniqueGroupItems.push(item);
+
       const colKey = `${item.rua}|${item.pos}`;
       if (!colGrouped.has(colKey)) {
         colGrouped.set(colKey, { rua: item.rua, pos: item.pos, levels: [] });
       }
-      colGrouped.get(colKey)!.levels.push(item.nivel);
+      const lvlList = colGrouped.get(colKey)!.levels;
+      if (!lvlList.includes(item.nivel)) {
+        lvlList.push(item.nivel);
+      }
     }
     const localCadastroParts = Array.from(colGrouped.values()).map(cg =>
       formatLevelsToSisplanLocal(cg.rua, cg.pos, cg.levels)
     );
-    const localCadastro = localCadastroParts.join(' / ') || group.items[0]?.rawLocal || 'Sem Local';
+    const localCadastro = localCadastroParts.join(' / ') || uniqueGroupItems[0]?.rawLocal || 'Sem Local';
 
     // 2. Constrói LOCAIS_BARRAS com quantidades individuais exatas por caixa (ex: RF.029.6 (46 pçs) | ...)
     const key = `${group.codigo}|${group.cor}|${group.tam}|${group.dep}`;
@@ -935,14 +965,23 @@ export function saveWmsStateLocally(
   transbordoRegistry: Record<string, TransbordoEntry>,
   barraItems: SkuItem[] = [],
   rawImportedCsv = '',
-  wmsPerspective: 'sku' | 'barra' = 'sku'
+  wmsPerspective: 'sku' | 'barra' = 'sku',
+  trackOfflineDiff = true
 ): string {
-  const csvStr = buildSisplanCsvString(skus, transbordoRegistry, barraItems);
+  const prevSnap = trackOfflineDiff ? loadLocalWmsSnapshotSync() : null;
+  const cleanSkus = deduplicateSkuItems(skus).items;
+  const cleanBarra = deduplicateSkuItems(barraItems).items;
+  const csvStr = buildSisplanCsvString(cleanSkus, transbordoRegistry, cleanBarra);
+
+  if (trackOfflineDiff) {
+    recordOfflineSkuTimestamps(prevSnap?.csv || null, csvStr);
+  }
+
   const payloadObj: WmsPersistedSnapshot = {
     csv: csvStr,
     rawImportedCsv: rawImportedCsv || undefined,
-    skusData: skus,
-    barraItemsData: barraItems,
+    skusData: cleanSkus,
+    barraItemsData: cleanBarra,
     movedSkus: movedSkusRegistry,
     transbordo: Object.values(transbordoRegistry || {}),
     wmsPerspective,
@@ -1005,19 +1044,47 @@ export function loadLocalWmsSnapshotSync(): WmsPersistedSnapshot | null {
 }
 
 // ============================================================================
-// OFFLINE SYNC QUEUE (LOCAL STORAGE + INDEXEDDB FOR AUTO-SYNC ON RECONNECT)
+// OFFLINE SYNC QUEUE + 3-WAY MULTI-DEVICE MERGE & CONFLICT PROTECTION
 // ============================================================================
 const OFFLINE_SYNC_QUEUE_KEY = 'estoque_os_pending_offline_sync_v1';
 const IDB_SYNC_QUEUE_KEY = 'pending_offline_sync_record';
+const SYNC_DEVICE_ID_KEY = 'estoque_os_sync_device_id_v1';
+const CLOUD_SYNC_BASE_CSV_KEY = 'estoque_os_cloud_sync_base_csv_v1';
+const IDB_SYNC_BASE_CSV_KEY = 'cloud_sync_base_csv';
+const OFFLINE_SKU_TIMESTAMPS_KEY = 'estoque_os_offline_sku_ts_v1';
+
+export interface OfflineSkuTimestampEntry {
+  updatedAt: number;
+  updatedAtIso: string;
+  deviceId: string;
+  wmsSignature: string;
+}
+
+export type OfflineSkuTimestampMap = Record<string, OfflineSkuTimestampEntry>;
 
 export interface PendingOfflineSyncRecord {
   csv: string;
   updatedAt: string;
   pendingChangesCount: number;
   cloudUrl?: string;
+  baseCsv?: string;
+  deviceId?: string;
+  skuTimestamps?: OfflineSkuTimestampMap;
 }
 
-function saveQueueToIndexedDB(payloadStr: string | null) {
+export function getOrCreateSyncDeviceId(): string {
+  try {
+    const existing = localStorage.getItem(SYNC_DEVICE_ID_KEY);
+    if (existing && existing.trim()) return existing;
+    const generated = `DEV-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+    localStorage.setItem(SYNC_DEVICE_ID_KEY, generated);
+    return generated;
+  } catch {
+    return 'DEV-LOCAL';
+  }
+}
+
+function saveIdbKeyValue(key: string, value: string | null) {
   try {
     if (!window.indexedDB) return;
     const req = window.indexedDB.open(IDB_NAME, 1);
@@ -1032,10 +1099,10 @@ function saveQueueToIndexedDB(payloadStr: string | null) {
         const db = (e.target as IDBOpenDBRequest).result;
         const tx = db.transaction(IDB_STORE, 'readwrite');
         const store = tx.objectStore(IDB_STORE);
-        if (payloadStr === null) {
-          store.delete(IDB_SYNC_QUEUE_KEY);
+        if (value === null) {
+          store.delete(key);
         } else {
-          store.put(payloadStr, IDB_SYNC_QUEUE_KEY);
+          store.put(value, key);
         }
       } catch {
         // ignore
@@ -1044,6 +1111,82 @@ function saveQueueToIndexedDB(payloadStr: string | null) {
   } catch {
     // ignore
   }
+}
+
+function loadIdbKeyValue(key: string): Promise<string | null> {
+  return new Promise(resolve => {
+    try {
+      if (!window.indexedDB) return resolve(null);
+      const req = window.indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = e => {
+        const db = (e.target as IDBOpenDBRequest).result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE);
+        }
+      };
+      req.onsuccess = e => {
+        try {
+          const db = (e.target as IDBOpenDBRequest).result;
+          const tx = db.transaction(IDB_STORE, 'readonly');
+          const getReq = tx.objectStore(IDB_STORE).get(key);
+          getReq.onsuccess = () => resolve((getReq.result as string) || null);
+          getReq.onerror = () => resolve(null);
+        } catch {
+          resolve(null);
+        }
+      };
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+export function loadCloudSyncBaseCsv(): string | null {
+  try {
+    return localStorage.getItem(CLOUD_SYNC_BASE_CSV_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export async function loadCloudSyncBaseCsvFromIDB(): Promise<string | null> {
+  const syncVal = loadCloudSyncBaseCsv();
+  if (syncVal) return syncVal;
+  return loadIdbKeyValue(IDB_SYNC_BASE_CSV_KEY);
+}
+
+export function saveCloudSyncBaseCsv(csvStr: string) {
+  if (!csvStr || !csvStr.trim()) return;
+  try {
+    localStorage.setItem(CLOUD_SYNC_BASE_CSV_KEY, csvStr);
+  } catch {
+    // ignore
+  }
+  saveIdbKeyValue(IDB_SYNC_BASE_CSV_KEY, csvStr);
+}
+
+export function loadOfflineSkuTimestamps(): OfflineSkuTimestampMap {
+  try {
+    const raw = localStorage.getItem(OFFLINE_SKU_TIMESTAMPS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as OfflineSkuTimestampMap) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function clearOfflineSkuTimestamps() {
+  try {
+    localStorage.removeItem(OFFLINE_SKU_TIMESTAMPS_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+function saveQueueToIndexedDB(payloadStr: string | null) {
+  saveIdbKeyValue(IDB_SYNC_QUEUE_KEY, payloadStr);
 }
 
 export function loadPendingOfflineSync(): PendingOfflineSyncRecord | null {
@@ -1056,7 +1199,10 @@ export function loadPendingOfflineSync(): PendingOfflineSyncRecord | null {
         csv: parsed.csv,
         updatedAt: parsed.updatedAt || new Date().toISOString(),
         pendingChangesCount: Math.max(1, Number(parsed.pendingChangesCount) || 1),
-        cloudUrl: parsed.cloudUrl
+        cloudUrl: parsed.cloudUrl,
+        baseCsv: typeof parsed.baseCsv === 'string' ? parsed.baseCsv : undefined,
+        deviceId: parsed.deviceId,
+        skuTimestamps: parsed.skuTimestamps
       };
     }
   } catch {
@@ -1112,11 +1258,17 @@ export function savePendingOfflineSync(
   cloudUrl?: string
 ): PendingOfflineSyncRecord {
   const existing = loadPendingOfflineSync();
+  const baseCsv = existing?.baseCsv || loadCloudSyncBaseCsv() || undefined;
+  const deviceId = getOrCreateSyncDeviceId();
+  const skuTimestamps = loadOfflineSkuTimestamps();
   const nextRecord: PendingOfflineSyncRecord = {
     csv: csvStr,
     updatedAt: new Date().toISOString(),
     pendingChangesCount: (existing?.pendingChangesCount || 0) + 1,
-    cloudUrl
+    cloudUrl,
+    baseCsv,
+    deviceId,
+    skuTimestamps
   };
   const str = JSON.stringify(nextRecord);
   try {
@@ -1135,6 +1287,359 @@ export function clearPendingOfflineSync() {
     // ignore
   }
   saveQueueToIndexedDB(null);
+  clearOfflineSkuTimestamps();
+}
+
+interface IndexedCsvSkuGroup {
+  skuKey: string;
+  code: string;
+  name: string;
+  colorHex: string;
+  localDisplay: string;
+  wmsList: string[];
+  wmsSignature: string;
+  items: SkuItem[];
+}
+
+function indexCsvByCanonicalSku(csvStr: string): {
+  skuGroups: Map<string, IndexedCsvSkuGroup>;
+  barraItems: SkuItem[];
+  transbordo: Record<string, TransbordoEntry>;
+} {
+  if (!csvStr || !csvStr.trim()) {
+    return { skuGroups: new Map(), barraItems: [], transbordo: {} };
+  }
+  const parsed = parseCsvData(csvStr, [], [], {}, 'replace');
+  const grouped = new Map<string, SkuItem[]>();
+
+  for (const item of parsed.skus) {
+    if (item.isTransbordo) continue;
+    const skuKey = getCanonicalSkuKey(item.code);
+    const list = grouped.get(skuKey);
+    if (list) list.push(item);
+    else grouped.set(skuKey, [item]);
+  }
+
+  const skuGroups = new Map<string, IndexedCsvSkuGroup>();
+  for (const [skuKey, list] of grouped.entries()) {
+    const sortedWms = Array.from(new Set(list.map(i => i.wms.toUpperCase()))).sort();
+    const towerMap = new Map<string, { rua: string; pos: number; levels: number[] }>();
+    for (const it of list) {
+      const tk = `${it.rua}.${it.pos}`;
+      const existing = towerMap.get(tk);
+      if (existing) {
+        if (!existing.levels.includes(it.nivel)) existing.levels.push(it.nivel);
+      } else {
+        towerMap.set(tk, { rua: it.rua, pos: it.pos, levels: [it.nivel] });
+      }
+    }
+    const groupedDisplay = Array.from(towerMap.values())
+      .map(t => formatLevelsToSisplanLocal(t.rua, t.pos, t.levels))
+      .join(' / ');
+
+    skuGroups.set(skuKey, {
+      skuKey,
+      code: list[0].code,
+      name: list[0].name,
+      colorHex: list[0].colorHex,
+      localDisplay: groupedDisplay || list[0].rawLocal || sortedWms.join(', '),
+      wmsList: sortedWms,
+      wmsSignature: sortedWms.join('|'),
+      items: list
+    });
+  }
+
+  return {
+    skuGroups,
+    barraItems: parsed.barraItems,
+    transbordo: parsed.transbordoRegistry
+  };
+}
+
+function mapCsvLinesBySkuKey(csvStr: string): Map<string, { fullLine: string; localField: string }> {
+  const map = new Map<string, { fullLine: string; localField: string }>();
+  if (!csvStr) return map;
+  const lines = csvStr.split(/\r?\n/);
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const cols = line.split(';');
+    if (cols.length < 5) continue;
+    if (String(cols[3] || '').toUpperCase().includes('TRANSBORDO')) continue;
+    const key = getCanonicalSkuKey(`${cols[0]} - ${cols[1]} - ${cols[2]}`);
+    const localField = String(cols[4] || '').trim().toUpperCase();
+    const prev = map.get(key);
+    if (prev) {
+      map.set(key, {
+        fullLine: `${prev.fullLine}\n${line}`,
+        localField: `${prev.localField}|${localField}`
+      });
+    } else {
+      map.set(key, { fullLine: line, localField });
+    }
+  }
+  return map;
+}
+
+/**
+ * Registra timestamps por SKU sempre que o estado local muda em relação ao snapshot anterior,
+ * permitindo detectar quais SKUs este dispositivo alterou offline e resolver conflitos por recência.
+ */
+export function recordOfflineSkuTimestamps(
+  prevCsv: string | null,
+  nextCsv: string
+): OfflineSkuTimestampMap {
+  if (!prevCsv || prevCsv === nextCsv) {
+    return loadOfflineSkuTimestamps();
+  }
+  const existing = loadOfflineSkuTimestamps();
+  const deviceId = getOrCreateSyncDeviceId();
+  const now = Date.now();
+  const nowIso = new Date(now).toISOString();
+
+  const prevMap = mapCsvLinesBySkuKey(prevCsv);
+  const nextMap = mapCsvLinesBySkuKey(nextCsv);
+
+  const allKeys = new Set<string>([...Array.from(prevMap.keys()), ...Array.from(nextMap.keys())]);
+
+  let changed = false;
+  const updated: OfflineSkuTimestampMap = { ...existing };
+  for (const key of allKeys) {
+    const prevEntry = prevMap.get(key);
+    const nextEntry = nextMap.get(key);
+    const prevLine = prevEntry?.fullLine || '';
+    const nextLine = nextEntry?.fullLine || 'DELETED';
+
+    if (prevLine !== nextLine) {
+      changed = true;
+      updated[key] = {
+        updatedAt: now,
+        updatedAtIso: nowIso,
+        deviceId,
+        wmsSignature: nextEntry?.localField || 'DELETED'
+      };
+    }
+  }
+
+  if (changed) {
+    try {
+      localStorage.setItem(OFFLINE_SKU_TIMESTAMPS_KEY, JSON.stringify(updated));
+    } catch {
+      // ignore
+    }
+  }
+  return updated;
+}
+
+export interface SyncConflictItem {
+  skuKey: string;
+  code: string;
+  name: string;
+  colorHex: string;
+  baseLocal: string;
+  localLocal: string;
+  localWmsList: string[];
+  localIsDeleted: boolean;
+  localUpdatedAt: string;
+  localDeviceId: string;
+  cloudLocal: string;
+  cloudWmsList: string[];
+  cloudIsDeleted: boolean;
+  cloudUpdatedAt: string;
+  recommendedChoice: 'local' | 'cloud';
+}
+
+export interface ThreeWayMergeResult {
+  status: 'merged_clean' | 'conflicts_detected';
+  mergedCsv: string;
+  conflicts: SyncConflictItem[];
+  summary: {
+    preservedCloudEdits: number;
+    preservedLocalEdits: number;
+    deduplicatedMatches: number;
+    conflictsCount: number;
+  };
+  buildResolvedCsv: (choices: Record<string, 'local' | 'cloud'>) => string;
+}
+
+/**
+ * Mesclagem inteligente 3-vias (BASE vs LOCAL vs CLOUD):
+ * - Preserva alterações offline de outros usuários em SKUs diferentes dos seus.
+ * - Deduplica automaticamente se dois dispositivos salvaram o mesmo SKU no mesmo endereço.
+ * - Detecta conflito quando dois dispositivos salvaram o mesmo SKU em endereços DIFERENTES,
+ *   garantindo que o SKU NUNCA seja duplicado em dois locais distintos.
+ */
+export function mergeThreeWayWmsCsv(params: {
+  baseCsv?: string | null;
+  localCsv: string;
+  cloudCsv: string;
+  localUpdatedAt?: string;
+  cloudUpdatedAt?: string;
+  localSkuTimestamps?: OfflineSkuTimestampMap;
+}): ThreeWayMergeResult {
+  const {
+    baseCsv,
+    localCsv,
+    cloudCsv,
+    localUpdatedAt = new Date().toISOString(),
+    cloudUpdatedAt = '',
+    localSkuTimestamps = loadOfflineSkuTimestamps()
+  } = params;
+
+  const baseIdx = baseCsv ? indexCsvByCanonicalSku(baseCsv) : null;
+  const localIdx = indexCsvByCanonicalSku(localCsv);
+  const cloudIdx = indexCsvByCanonicalSku(cloudCsv);
+
+  const allSkuKeys = new Set<string>([
+    ...(baseIdx ? Array.from(baseIdx.skuGroups.keys()) : []),
+    ...Array.from(localIdx.skuGroups.keys()),
+    ...Array.from(cloudIdx.skuGroups.keys())
+  ]);
+
+  const resolvedGroups = new Map<string, SkuItem[]>();
+  const conflicts: SyncConflictItem[] = [];
+  const conflictGroupPairs = new Map<string, { localItems: SkuItem[]; cloudItems: SkuItem[] }>();
+
+  let preservedCloudEdits = 0;
+  let preservedLocalEdits = 0;
+  let deduplicatedMatches = 0;
+
+  const cloudTsMs = cloudUpdatedAt ? Date.parse(cloudUpdatedAt) || 0 : 0;
+
+  for (const skuKey of allSkuKeys) {
+    const baseG = baseIdx?.skuGroups.get(skuKey);
+    const localG = localIdx.skuGroups.get(skuKey);
+    const cloudG = cloudIdx.skuGroups.get(skuKey);
+
+    const baseSig = baseG ? baseG.wmsSignature : '';
+    const localSig = localG ? localG.wmsSignature : '';
+    const cloudSig = cloudG ? cloudG.wmsSignature : '';
+
+    // 1. Ambos possuem o mesmo endereço (ou ambos removeram) -> Sem conflito e sem duplicação!
+    if (localSig === cloudSig) {
+      deduplicatedMatches++;
+      if (localG && cloudG) {
+        // Mescla itens por wms exato sem duplicar, preferindo o mais completo/recente
+        const localTsEntry = localSkuTimestamps[skuKey];
+        const useLocal = !localTsEntry || localTsEntry.updatedAt >= cloudTsMs;
+        resolvedGroups.set(
+          skuKey,
+          deduplicateSkuItems(useLocal ? localG.items : cloudG.items).items
+        );
+      } else if (localG) {
+        resolvedGroups.set(skuKey, deduplicateSkuItems(localG.items).items);
+      }
+      continue;
+    }
+
+    // 2. Existe BASE conhecida para comparação 3-vias exata
+    if (baseIdx) {
+      const cloudChanged = cloudSig !== baseSig;
+      const localChanged = localSig !== baseSig;
+
+      if (localChanged && !cloudChanged) {
+        // Apenas este dispositivo alterou este SKU offline -> preserva alteração local
+        preservedLocalEdits++;
+        if (localG) resolvedGroups.set(skuKey, deduplicateSkuItems(localG.items).items);
+        continue;
+      }
+
+      if (cloudChanged && !localChanged) {
+        // Apenas outro dispositivo alterou este SKU na nuvem -> preserva alteração da nuvem
+        preservedCloudEdits++;
+        if (cloudG) resolvedGroups.set(skuKey, deduplicateSkuItems(cloudG.items).items);
+        continue;
+      }
+    } else {
+      // Sem BASE conhecida: usa o diário local de timestamps para saber se este dispositivo realmente editou este SKU
+      const localTouched = Boolean(localSkuTimestamps[skuKey]);
+      if (!localTouched && cloudG) {
+        // Este dispositivo não editou esse SKU; nuvem trouxe atualização de outro usuário
+        preservedCloudEdits++;
+        resolvedGroups.set(skuKey, deduplicateSkuItems(cloudG.items).items);
+        continue;
+      }
+      if (localTouched && !cloudG && localG) {
+        // SKU recém-criado localmente que ainda não existe na nuvem
+        preservedLocalEdits++;
+        resolvedGroups.set(skuKey, deduplicateSkuItems(localG.items).items);
+        continue;
+      }
+    }
+
+    // 3. CONFLITO REAL: Ambos alteraram o mesmo SKU para endereços DIFERENTES!
+    // Regra de ouro: NUNCA deixar o SKU salvo em dois endereços diferentes!
+    const tsEntry = localSkuTimestamps[skuKey];
+    const localTsMs = tsEntry?.updatedAt || (localUpdatedAt ? Date.parse(localUpdatedAt) || 0 : 0);
+    const recommendedChoice: 'local' | 'cloud' = localTsMs >= cloudTsMs ? 'local' : 'cloud';
+
+    const ref = localG || cloudG || baseG!;
+    conflicts.push({
+      skuKey,
+      code: ref.code,
+      name: ref.name,
+      colorHex: ref.colorHex || '#0A84FF',
+      baseLocal: baseG ? baseG.localDisplay : 'Não existia (SKU novo)',
+      localLocal: localG ? localG.localDisplay : 'Removido neste dispositivo',
+      localWmsList: localG ? localG.wmsList : [],
+      localIsDeleted: !localG,
+      localUpdatedAt: tsEntry?.updatedAtIso || localUpdatedAt,
+      localDeviceId: tsEntry?.deviceId || getOrCreateSyncDeviceId(),
+      cloudLocal: cloudG ? cloudG.localDisplay : 'Removido na nuvem',
+      cloudWmsList: cloudG ? cloudG.wmsList : [],
+      cloudIsDeleted: !cloudG,
+      cloudUpdatedAt: cloudUpdatedAt || 'Nuvem (mais recente)',
+      recommendedChoice
+    });
+
+    conflictGroupPairs.set(skuKey, {
+      localItems: localG ? deduplicateSkuItems(localG.items).items : [],
+      cloudItems: cloudG ? deduplicateSkuItems(cloudG.items).items : []
+    });
+  }
+
+  // Mescla colmeias de Transbordo sem duplicatas
+  const mergedTransbordo: Record<string, TransbordoEntry> = {
+    ...cloudIdx.transbordo,
+    ...localIdx.transbordo
+  };
+
+  // Mescla barraItems deduplicados por skuKey@@wms
+  const mergedBarra = deduplicateSkuItems([...cloudIdx.barraItems, ...localIdx.barraItems]).items;
+
+  const buildResolvedCsv = (choices: Record<string, 'local' | 'cloud'>): string => {
+    const finalItems: SkuItem[] = [];
+    for (const items of resolvedGroups.values()) {
+      finalItems.push(...items);
+    }
+    for (const conflict of conflicts) {
+      const pair = conflictGroupPairs.get(conflict.skuKey);
+      if (!pair) continue;
+      const choice = choices[conflict.skuKey] || conflict.recommendedChoice;
+      const picked = choice === 'local' ? pair.localItems : pair.cloudItems;
+      finalItems.push(...picked);
+    }
+    const cleanSkus = deduplicateSkuItems(finalItems).items;
+    return buildSisplanCsvString(cleanSkus, mergedTransbordo, mergedBarra);
+  };
+
+  const defaultChoices: Record<string, 'local' | 'cloud'> = {};
+  for (const c of conflicts) {
+    defaultChoices[c.skuKey] = c.recommendedChoice;
+  }
+
+  return {
+    status: conflicts.length > 0 ? 'conflicts_detected' : 'merged_clean',
+    mergedCsv: buildResolvedCsv(defaultChoices),
+    conflicts,
+    summary: {
+      preservedCloudEdits,
+      preservedLocalEdits,
+      deduplicatedMatches,
+      conflictsCount: conflicts.length
+    },
+    buildResolvedCsv
+  };
 }
 
 // ============================================================================

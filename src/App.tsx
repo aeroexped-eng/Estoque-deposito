@@ -61,7 +61,13 @@ import {
   loadPendingOfflineSync,
   loadPendingOfflineSyncFromIDB,
   savePendingOfflineSync,
-  clearPendingOfflineSync
+  clearPendingOfflineSync,
+  deduplicateSkuItems,
+  loadCloudSyncBaseCsvFromIDB,
+  saveCloudSyncBaseCsv,
+  loadOfflineSkuTimestamps,
+  mergeThreeWayWmsCsv,
+  ThreeWayMergeResult
 } from './utils/storageAndSync';
 import { ReportModal } from './components/ReportModal';
 import { InventoryAuditModal } from './components/InventoryAuditModal';
@@ -72,6 +78,7 @@ import { ExecutiveDashboard } from './components/ExecutiveDashboard';
 import { RelocateModal } from './components/RelocateModal';
 import { ExportAddressesModal } from './components/ExportAddressesModal';
 import { PWAInstallButton, OfflineSyncBanner } from './components/PWAInstallButton';
+import { SyncConflictModal } from './components/SyncConflictModal';
 import { useOnlineStatus } from './hooks/usePWA';
 import { ImportHistorySnapshot } from './components/OccupancyEvolutionChart';
 
@@ -367,6 +374,9 @@ export default function App() {
   );
   const [isSyncingOfflineQueue, setIsSyncingOfflineQueue] = useState<boolean>(false);
   const isSyncingOfflineRef = useRef<boolean>(false);
+  const [pendingSyncMerge, setPendingSyncMerge] = useState<ThreeWayMergeResult | null>(null);
+  const [showSyncConflictModal, setShowSyncConflictModal] = useState<boolean>(false);
+  const [isResolvingConflicts, setIsResolvingConflicts] = useState<boolean>(false);
   const [generatedHtmlCode, setGeneratedHtmlCode] = useState<string>('');
   const [isGeneratingHtml, setIsGeneratingHtml] = useState<boolean>(false);
 
@@ -507,14 +517,16 @@ export default function App() {
         }
       }
 
-      // Restaura dados estruturados com quantidades intactas se presentes no snapshot
+      // Restaura dados estruturados com quantidades intactas e proteção anti-duplicidade
       if (Array.isArray(skusFromSnap) && skusFromSnap.length > 0) {
         if (!mounted) return;
-        setSkus(skusFromSnap);
-        setBarraItems(Array.isArray(barraFromSnap) ? barraFromSnap : []);
+        const cleanSkus = deduplicateSkuItems(skusFromSnap).items;
+        const cleanBarra = deduplicateSkuItems(Array.isArray(barraFromSnap) ? barraFromSnap : []).items;
+        setSkus(cleanSkus);
+        setBarraItems(cleanBarra);
         setTransbordoRegistry(initTrb);
         if (movedFromSnap) setMovedSkusRegistry(movedFromSnap);
-        setOriginalBaselineLocations(buildBaselineFromSkus(skusFromSnap));
+        setOriginalBaselineLocations(buildBaselineFromSkus(cleanSkus));
         if (rawCsvFromSnap) setRawImportedCsv(rawCsvFromSnap);
         if (perspectiveFromSnap) setWmsPerspective(perspectiveFromSnap);
         return;
@@ -539,7 +551,7 @@ export default function App() {
       applyCsvAndSnapshot(EMBEDDED_SISPLAN_CSV);
     }
 
-    // 2. Async IndexedDB & Cloud Pull (protects local offline edits from being overwritten)
+    // 2. Async IndexedDB & 3-Way Cloud Pull/Merge (protects local offline edits & merges other users' edits)
     (async () => {
       if (!syncSnap) {
         const idbRaw = await loadFromIndexedDB();
@@ -563,10 +575,60 @@ export default function App() {
         if (navigator.onLine && (activeUrl || pendingRecord.cloudUrl)) {
           const targetUrl = activeUrl || pendingRecord.cloudUrl || '';
           setCloudStatus('syncing');
-          setCloudStatusText(`Sincronizando Offline (${pendingRecord.pendingChangesCount})...`);
+          setCloudStatusText(`Mesclando Offline (${pendingRecord.pendingChangesCount})...`);
+          const cloudData = await pullStateFromCloud(targetUrl);
+          if (!mounted) return;
+
+          if (cloudData && cloudData.csv) {
+            const baseCsv = pendingRecord.baseCsv || (await loadCloudSyncBaseCsvFromIDB());
+            const mergeRes = mergeThreeWayWmsCsv({
+              baseCsv,
+              localCsv: pendingRecord.csv,
+              cloudCsv: cloudData.csv,
+              localUpdatedAt: pendingRecord.updatedAt,
+              cloudUpdatedAt: cloudData.updatedAt,
+              localSkuTimestamps: pendingRecord.skuTimestamps || loadOfflineSkuTimestamps()
+            });
+            if (!mounted) return;
+
+            if (mergeRes.status === 'conflicts_detected') {
+              setPendingSyncMerge(mergeRes);
+              setShowSyncConflictModal(true);
+              setCloudStatus('error');
+              setCloudStatusText(`⚔️ ${mergeRes.conflicts.length} Conflito(s)`);
+              return;
+            }
+
+            const pushed = await pushStateToCloud(targetUrl, mergeRes.mergedCsv);
+            if (!mounted) return;
+            if (pushed) {
+              applyCsvAndSnapshot(mergeRes.mergedCsv);
+              const parsedMerged = parseCsvData(mergeRes.mergedCsv, [], [], {}, 'replace');
+              saveWmsStateLocally(
+                parsedMerged.skus,
+                {},
+                parsedMerged.transbordoRegistry,
+                parsedMerged.barraItems,
+                '',
+                wmsPerspective,
+                false
+              );
+              saveCloudSyncBaseCsv(mergeRes.mergedCsv);
+              clearPendingOfflineSync();
+              setPendingOfflineSyncCount(0);
+              setCloudStatus('ok');
+              setCloudStatusText('Nuvem Conectada');
+            } else {
+              setCloudStatus('error');
+              setCloudStatusText(`Pendente Offline (${pendingRecord.pendingChangesCount})`);
+            }
+            return;
+          }
+
           const pushed = await pushStateToCloud(targetUrl, pendingRecord.csv);
           if (!mounted) return;
           if (pushed) {
+            saveCloudSyncBaseCsv(pendingRecord.csv);
             clearPendingOfflineSync();
             setPendingOfflineSyncCount(0);
             setCloudStatus('ok');
@@ -598,6 +660,7 @@ export default function App() {
         if (!mounted) return;
         if (cloudData && cloudData.csv) {
           applyCsvAndSnapshot(cloudData.csv);
+          saveCloudSyncBaseCsv(cloudData.csv);
           setCloudStatus('ok');
           setCloudStatusText('Nuvem Conectada');
         } else {
@@ -612,15 +675,15 @@ export default function App() {
     };
   }, [buildBaselineFromSkus]);
 
-  // Flush queued offline edits to cloud when connection returns or manual trigger
+  // Flush queued offline edits with 3-way merge & anti-duplication conflict detection
   const flushPendingOfflineSync = useCallback(
-    async (manualTrigger = false) => {
+    async (manualTrigger = false, overrideLocalCsv?: string) => {
       if (isSyncingOfflineRef.current) return false;
       if (!navigator.onLine) {
         if (manualTrigger) {
           showToast(
             'Sem Conexão com a Internet',
-            'Suas alterações seguem salvas localmente e serão sincronizadas ao reconectar.',
+            'Suas alterações seguem salvas localmente e serão mescladas automaticamente ao reconectar.',
             '📶'
           );
         }
@@ -628,12 +691,13 @@ export default function App() {
       }
 
       const pendingRecord = await loadPendingOfflineSyncFromIDB();
-      if (!pendingRecord) {
+      const localCsvToSync = overrideLocalCsv || pendingRecord?.csv;
+      if (!localCsvToSync) {
         setPendingOfflineSyncCount(0);
         return true;
       }
 
-      const targetUrl = cloudSyncUrl || pendingRecord.cloudUrl || getSavedCloudSyncUrl();
+      const targetUrl = cloudSyncUrl || pendingRecord?.cloudUrl || getSavedCloudSyncUrl();
       if (!targetUrl) {
         clearPendingOfflineSync();
         setPendingOfflineSyncCount(0);
@@ -643,25 +707,92 @@ export default function App() {
       isSyncingOfflineRef.current = true;
       setIsSyncingOfflineQueue(true);
       setCloudStatus('syncing');
-      setCloudStatusText(`Sincronizando Offline (${pendingRecord.pendingChangesCount})...`);
+      setCloudStatusText(
+        pendingRecord
+          ? `Mesclando Offline (${pendingRecord.pendingChangesCount})...`
+          : 'Mesclando com Nuvem...'
+      );
 
       try {
-        const ok = await pushStateToCloud(targetUrl, pendingRecord.csv);
+        const cloudData = await pullStateFromCloud(targetUrl);
+        let csvToPush = localCsvToSync;
+        let mergeSummaryInfo = '';
+
+        if (cloudData && cloudData.csv) {
+          const baseCsv = pendingRecord?.baseCsv || (await loadCloudSyncBaseCsvFromIDB());
+          const mergeRes = mergeThreeWayWmsCsv({
+            baseCsv,
+            localCsv: localCsvToSync,
+            cloudCsv: cloudData.csv,
+            localUpdatedAt: pendingRecord?.updatedAt || new Date().toISOString(),
+            cloudUpdatedAt: cloudData.updatedAt,
+            localSkuTimestamps: pendingRecord?.skuTimestamps || loadOfflineSkuTimestamps()
+          });
+
+          if (mergeRes.status === 'conflicts_detected') {
+            setPendingSyncMerge(mergeRes);
+            setShowSyncConflictModal(true);
+            setCloudStatus('error');
+            setCloudStatusText(`⚔️ ${mergeRes.conflicts.length} Conflito(s)`);
+            playMacSound('alert', soundEnabled);
+            showToast(
+              `Conflito de Endereço Detectado (${mergeRes.conflicts.length})`,
+              'Dois dispositivos salvaram o mesmo SKU em locais diferentes. Escolha 1 destino para evitar duplicação.',
+              '⚔️'
+            );
+            return false;
+          }
+
+          csvToPush = mergeRes.mergedCsv;
+          const parsedMerged = parseCsvData(csvToPush, [], [], transbordoRegistry, 'replace');
+          setSkus(parsedMerged.skus);
+          setBarraItems(parsedMerged.barraItems);
+          setTransbordoRegistry(parsedMerged.transbordoRegistry);
+          setOriginalBaselineLocations(buildBaselineFromSkus(parsedMerged.skus));
+          saveWmsStateLocally(
+            parsedMerged.skus,
+            movedSkusRegistry,
+            parsedMerged.transbordoRegistry,
+            parsedMerged.barraItems,
+            rawImportedCsv,
+            wmsPerspective,
+            false
+          );
+
+          const parts: string[] = [];
+          if (mergeRes.summary.preservedCloudEdits > 0) {
+            parts.push(`+${mergeRes.summary.preservedCloudEdits} de outros usuários`);
+          }
+          if (mergeRes.summary.preservedLocalEdits > 0) {
+            parts.push(`+${mergeRes.summary.preservedLocalEdits} deste dispositivo`);
+          }
+          if (mergeRes.summary.deduplicatedMatches > 0) {
+            parts.push(`${mergeRes.summary.deduplicatedMatches} deduplicados`);
+          }
+          mergeSummaryInfo = parts.join(' • ');
+        }
+
+        const ok = await pushStateToCloud(targetUrl, csvToPush);
         if (ok) {
+          saveCloudSyncBaseCsv(csvToPush);
           clearPendingOfflineSync();
           setPendingOfflineSyncCount(0);
+          setPendingSyncMerge(null);
+          setShowSyncConflictModal(false);
           setCloudStatus('ok');
           setCloudStatusText('Salvo na Nuvem');
           playMacSound('success', soundEnabled);
           showToast(
-            'Conexão Restabelecida — Dados Sincronizados',
-            `${pendingRecord.pendingChangesCount} alteração(ões) feita(s) offline foram enviadas para a nuvem.`,
+            'Sincronização Multi-Dispositivo Concluída',
+            mergeSummaryInfo || 'Alterações mescladas com segurança na nuvem (0 duplicatas).',
             '☁️'
           );
           return true;
         } else {
           setCloudStatus('error');
-          setCloudStatusText(`Pendente Offline (${pendingRecord.pendingChangesCount})`);
+          setCloudStatusText(
+            `Pendente Offline (${pendingRecord?.pendingChangesCount || 1})`
+          );
           if (manualTrigger) {
             showToast(
               'Falha Temporária na Sincronização',
@@ -676,7 +807,91 @@ export default function App() {
         setIsSyncingOfflineQueue(false);
       }
     },
-    [cloudSyncUrl, soundEnabled, showToast]
+    [
+      cloudSyncUrl,
+      soundEnabled,
+      showToast,
+      transbordoRegistry,
+      buildBaselineFromSkus,
+      movedSkusRegistry,
+      rawImportedCsv,
+      wmsPerspective
+    ]
+  );
+
+  // Resolve conflicting SKU addresses chosen by user and sync cleanly without duplicates
+  const handleResolveSyncConflicts = useCallback(
+    async (choices: Record<string, 'local' | 'cloud'>) => {
+      if (!pendingSyncMerge) return;
+      setIsResolvingConflicts(true);
+      try {
+        const finalCsv = pendingSyncMerge.buildResolvedCsv(choices);
+        const parsedFinal = parseCsvData(finalCsv, [], [], transbordoRegistry, 'replace');
+
+        setSkus(parsedFinal.skus);
+        setBarraItems(parsedFinal.barraItems);
+        setTransbordoRegistry(parsedFinal.transbordoRegistry);
+        setOriginalBaselineLocations(buildBaselineFromSkus(parsedFinal.skus));
+
+        saveWmsStateLocally(
+          parsedFinal.skus,
+          movedSkusRegistry,
+          parsedFinal.transbordoRegistry,
+          parsedFinal.barraItems,
+          rawImportedCsv,
+          wmsPerspective,
+          false
+        );
+
+        const targetUrl = cloudSyncUrl || getSavedCloudSyncUrl();
+        if (targetUrl && navigator.onLine) {
+          const ok = await pushStateToCloud(targetUrl, finalCsv);
+          if (ok) {
+            saveCloudSyncBaseCsv(finalCsv);
+            clearPendingOfflineSync();
+            setPendingOfflineSyncCount(0);
+            setPendingSyncMerge(null);
+            setShowSyncConflictModal(false);
+            setCloudStatus('ok');
+            setCloudStatusText('Conflitos Resolvidos');
+            playMacSound('success', soundEnabled);
+            showToast(
+              'Conflitos Resolvidos & Sincronizados',
+              `${pendingSyncMerge.conflicts.length} conflito(s) resolvido(s) sem duplicação de SKUs.`,
+              '🛡️'
+            );
+          } else {
+            const rec = savePendingOfflineSync(finalCsv, targetUrl);
+            setPendingOfflineSyncCount(rec.pendingChangesCount);
+            setShowSyncConflictModal(false);
+            setCloudStatus('error');
+            setCloudStatusText('Pendente Envio');
+            playMacSound('alert', soundEnabled);
+            showToast(
+              'Escolhas Salvas Localmente',
+              'Não foi possível enviar à nuvem agora; a versão resolvida está na fila.',
+              '⚠️'
+            );
+          }
+        } else {
+          savePendingOfflineSync(finalCsv, targetUrl);
+          setShowSyncConflictModal(false);
+        }
+      } finally {
+        setIsResolvingConflicts(false);
+      }
+    },
+    [
+      pendingSyncMerge,
+      transbordoRegistry,
+      buildBaselineFromSkus,
+      movedSkusRegistry,
+      rawImportedCsv,
+      wmsPerspective,
+      cloudSyncUrl,
+      soundEnabled,
+      showToast
+    ]
   );
 
   // Auto-sync queued offline changes when browser reconnects + notify PWA offline cache readiness
@@ -747,16 +962,24 @@ export default function App() {
         wmsPerspective
       );
       if (actualPushCloud && cloudSyncUrl) {
-        if (!navigator.onLine) {
+        const hasPendingOrConflicts = Boolean(
+          pendingSyncMerge || pendingOfflineSyncCount > 0 || loadPendingOfflineSync()
+        );
+        if (!navigator.onLine || hasPendingOrConflicts) {
           const rec = savePendingOfflineSync(csvStr, cloudSyncUrl);
           setPendingOfflineSyncCount(rec.pendingChangesCount);
-          setCloudStatus('idle');
-          setCloudStatusText(`Offline (${rec.pendingChangesCount} pend.)`);
+          if (!navigator.onLine) {
+            setCloudStatus('idle');
+            setCloudStatusText(`Offline (${rec.pendingChangesCount} pend.)`);
+          } else {
+            flushPendingOfflineSync(false, csvStr);
+          }
         } else {
           setCloudStatus('syncing');
           setCloudStatusText('Salvando Nuvem...');
           pushStateToCloud(cloudSyncUrl, csvStr).then(ok => {
             if (ok) {
+              saveCloudSyncBaseCsv(csvStr);
               clearPendingOfflineSync();
               setPendingOfflineSyncCount(0);
               setCloudStatus('ok');
@@ -771,7 +994,15 @@ export default function App() {
         }
       }
     },
-    [barraItems, rawImportedCsv, wmsPerspective, cloudSyncUrl]
+    [
+      barraItems,
+      rawImportedCsv,
+      wmsPerspective,
+      cloudSyncUrl,
+      pendingSyncMerge,
+      pendingOfflineSyncCount,
+      flushPendingOfflineSync
+    ]
   );
 
   // Manual save trigger
@@ -797,20 +1028,7 @@ export default function App() {
           setCloudStatus('idle');
           setCloudStatusText(`Offline (${rec.pendingChangesCount} pend.)`);
         } else {
-          setCloudStatus('syncing');
-          pushStateToCloud(cloudSyncUrl, csvStr).then(ok => {
-            if (ok) {
-              clearPendingOfflineSync();
-              setPendingOfflineSyncCount(0);
-              setCloudStatus('ok');
-              setCloudStatusText('Salvo na Nuvem');
-            } else {
-              const rec = savePendingOfflineSync(csvStr, cloudSyncUrl);
-              setPendingOfflineSyncCount(rec.pendingChangesCount);
-              setCloudStatus('error');
-              setCloudStatusText(`Pendente (${rec.pendingChangesCount})`);
-            }
-          });
+          flushPendingOfflineSync(false, csvStr);
         }
       }
       showToast(
@@ -868,18 +1086,7 @@ export default function App() {
             setLastSavedTimestamp(now);
 
             if (cloudSyncUrl && navigator.onLine && (autoRefreshMode === 'save_and_sync' || cloudStatus === 'ok')) {
-              setCloudStatus('syncing');
-              pushStateToCloud(cloudSyncUrl, csvStr).then(ok => {
-                if (ok) {
-                  clearPendingOfflineSync();
-                  setPendingOfflineSyncCount(0);
-                  setCloudStatus('ok');
-                  setCloudStatusText('Salvo na Nuvem');
-                } else {
-                  setCloudStatus('error');
-                  setCloudStatusText('Salvo Localmente');
-                }
-              });
+              flushPendingOfflineSync(false, csvStr);
             }
 
             if (autoRefreshMode === 'save_and_reload') {
@@ -2064,29 +2271,34 @@ export default function App() {
       const oldRaw = sku.rawLocal || sku.wms;
       const newRawLocal = suggestion.formattedLocal;
       const siblingIdSet = new Set(multiInfo.siblingItems.map(s => s.id));
+      const uniqueDestLevels = Array.from(new Set(suggestion.levels)).sort((a, b) => a - b);
 
-      const nextSkus = skus.map(item => {
-        if (!siblingIdSet.has(item.id)) return item;
-        const idx = multiInfo.siblingItems.findIndex(s => s.id === item.id);
-        const lv = suggestion.levels[idx] || suggestion.levels[0];
+      const relocatedStreetItems: SkuItem[] = uniqueDestLevels.map((lv, idx) => {
+        const template = multiInfo.siblingItems[idx] || sku;
         return {
-          ...item,
-          lastRelocatedFrom: item.wms,
+          ...template,
+          id: idx < multiInfo.siblingItems.length ? template.id : `sku-drag-${Date.now()}-${lv}-${idx}`,
+          lastRelocatedFrom: template.wms,
           rua: suggestion.rua,
           pos: suggestion.pos,
           nivel: lv,
           wms: formatWmsAddress(suggestion.rua, suggestion.pos, lv),
           rawLocal: newRawLocal,
-          colecao: isReservedCol35Street(suggestion.rua) ? '35' : item.colecao
+          colecao: isReservedCol35Street(suggestion.rua) ? '35' : template.colecao
         };
       });
+
+      const nextSkus = deduplicateSkuItems([
+        ...relocatedStreetItems,
+        ...skus.filter(item => !siblingIdSet.has(item.id))
+      ]).items;
 
       const { nextMoved } = recordSkuMoved(sku, oldRaw, newRawLocal, 'drag', movedSkusRegistry);
       setSkus(nextSkus);
       setMovedSkusRegistry(nextMoved);
       selectStreet(suggestion.rua);
       setSelectedAddressKey(suggestion.wms);
-      setSelectedSkuId(sku.id);
+      setSelectedSkuId(relocatedStreetItems[0]?.id || sku.id);
       persistCurrentState(nextSkus, nextMoved, transbordoRegistry);
       playMacSound('success', soundEnabled);
       showToast(
@@ -2163,24 +2375,29 @@ export default function App() {
           chosenLevels = [parsedDest.nivel, ...others].sort((a, b) => a - b);
         }
 
-        const newRawLocal = formatLevelsToSisplanLocal(parsedDest.rua, parsedDest.pos, chosenLevels);
+        const uniqueChosen = Array.from(new Set(chosenLevels)).sort((a, b) => a - b);
+        const newRawLocal = formatLevelsToSisplanLocal(parsedDest.rua, parsedDest.pos, uniqueChosen);
         const oldRaw = sku.rawLocal || sku.wms;
 
-        const nextSkus = skus.map(item => {
-          if (!excludeIds.has(item.id)) return item;
-          const idx = multiInfo.siblingItems.findIndex(s => s.id === item.id);
-          const lv = chosenLevels[idx] || chosenLevels[0];
+        const relocatedItems: SkuItem[] = uniqueChosen.map((lv, idx) => {
+          const template = multiInfo.siblingItems[idx] || sku;
           return {
-            ...item,
-            lastRelocatedFrom: item.wms,
+            ...template,
+            id: idx < multiInfo.siblingItems.length ? template.id : `sku-drop-${Date.now()}-${lv}-${idx}`,
+            lastRelocatedFrom: template.wms,
             rua: parsedDest.rua,
             pos: parsedDest.pos,
             nivel: lv,
             wms: formatWmsAddress(parsedDest.rua, parsedDest.pos, lv),
             rawLocal: newRawLocal,
-            colecao: isReservedCol35Street(parsedDest.rua) ? '35' : item.colecao
+            colecao: isReservedCol35Street(parsedDest.rua) ? '35' : template.colecao
           };
         });
+
+        const nextSkus = deduplicateSkuItems([
+          ...relocatedItems,
+          ...skus.filter(item => !excludeIds.has(item.id))
+        ]).items;
 
         const { nextMoved, staysMoved } = recordSkuMoved(
           sku,
@@ -2192,8 +2409,8 @@ export default function App() {
         setSkus(nextSkus);
         setMovedSkusRegistry(nextMoved);
         setSelectedStreet(parsedDest.rua);
-        setSelectedAddressKey(formatWmsAddress(parsedDest.rua, parsedDest.pos, chosenLevels[0]));
-        setSelectedSkuId(sku.id);
+        setSelectedAddressKey(formatWmsAddress(parsedDest.rua, parsedDest.pos, uniqueChosen[0]));
+        setSelectedSkuId(relocatedItems[0]?.id || sku.id);
         persistCurrentState(nextSkus, nextMoved, transbordoRegistry);
         playMacSound(staysMoved ? 'success' : 'pop', soundEnabled);
         showToast(
@@ -2237,7 +2454,7 @@ export default function App() {
         sameColLevels
       );
 
-      const finalSkus = updatedSkus.map(item => {
+      const mappedSkus = updatedSkus.map(item => {
         if (
           getCanonicalSkuKey(item.code) === skuKey &&
           item.rua === parsedDest.rua &&
@@ -2247,6 +2464,8 @@ export default function App() {
         }
         return item;
       });
+
+      const finalSkus = deduplicateSkuItems(mappedSkus).items;
 
       const { nextMoved, staysMoved } = recordSkuMoved(
         sku,
@@ -2774,18 +2993,30 @@ export default function App() {
     const codigoBase = validation.baseCode;
     const finalCode = validation.normalizedCode;
     const finalName = skuFormName.trim() || dec.autoName;
+    const uniqueSelectedLevels = Array.from(new Set(skuFormSelectedLevels)).sort((a, b) => a - b);
     const groupedLocal = formatLevelsToSisplanLocal(
       skuFormRua,
       skuFormPos,
-      skuFormSelectedLevels
+      uniqueSelectedLevels
     );
     const skuKey = getCanonicalSkuKey(finalCode);
+    const existingForSku = skus.filter(
+      s => !s.isTransbordo && getCanonicalSkuKey(s.code) === skuKey
+    );
+    const existingWmsSig = existingForSku.map(s => s.wms).sort().join('|');
+    const targetWmsSig = uniqueSelectedLevels
+      .map(lv => formatWmsAddress(skuFormRua, skuFormPos, lv))
+      .sort()
+      .join('|');
+    const isExactSameSlotUpdate = Boolean(existingWmsSig && existingWmsSig === targetWmsSig);
+    const isMovedFromOtherSlot = Boolean(existingForSku.length > 0 && existingWmsSig !== targetWmsSig);
+
     const filtered = skus.filter(
       s => getCanonicalSkuKey(s.code) !== skuKey && s.id !== skuFormEditId
     );
     const depositoFinal = skuFormDeposito || '2';
 
-    const created: SkuItem[] = skuFormSelectedLevels.map((lv, idx) => ({
+    const created: SkuItem[] = uniqueSelectedLevels.map((lv, idx) => ({
       id: idx === 0 && skuFormEditId ? skuFormEditId : `sku-${Date.now()}-${lv}-${idx}`,
       code: finalCode,
       codigoBase,
@@ -2828,7 +3059,7 @@ export default function App() {
       ...prev.filter(e => e.skuKey !== skuKey)
     ]);
 
-    const nextSkus = [...created, ...filtered];
+    const nextSkus = deduplicateSkuItems([...created, ...filtered]).items;
     setSkus(nextSkus);
     selectStreet(skuFormRua);
     setSelectedAddressKey(created[0].wms);
@@ -2841,7 +3072,17 @@ export default function App() {
       exportQuickMovementCsv([quickEntry], codigoBase);
     } else {
       playMacSound('success', soundEnabled);
-      showToast('SKU Alocado no Mapa', `${finalCode} salvo em ${groupedLocal}`, '🏢');
+      showToast(
+        isExactSameSlotUpdate
+          ? 'SKU Atualizado (Sem Duplicação)'
+          : isMovedFromOtherSlot
+            ? 'SKU Movido Sem Duplicação'
+            : 'SKU Alocado no Mapa',
+        isExactSameSlotUpdate
+          ? `${finalCode} já estava em ${groupedLocal} — cadastro atualizado no mesmo local.`
+          : `${finalCode} salvo em ${groupedLocal}`,
+        isExactSameSlotUpdate ? '🛡️' : '🏢'
+      );
     }
   };
 
@@ -8117,6 +8358,63 @@ export default function App() {
                 );
               })()}
 
+              {/* Live Anti-Duplication Alert when SKU already exists in map */}
+              {(() => {
+                const liveValidation = validateSkuNamingPattern(skuFormCode);
+                if (!liveValidation.isValid) return null;
+                const typedKey = getCanonicalSkuKey(liveValidation.normalizedCode);
+                const existingMatches = skus.filter(
+                  s => !s.isTransbordo && getCanonicalSkuKey(s.code) === typedKey
+                );
+                if (existingMatches.length === 0) return null;
+
+                const targetSig = Array.from(new Set(skuFormSelectedLevels))
+                  .map(lv => formatWmsAddress(skuFormRua, skuFormPos, lv))
+                  .sort()
+                  .join('|');
+                const existingSig = existingMatches.map(m => m.wms).sort().join('|');
+                const sameSpot = targetSig === existingSig;
+                const existingLabel = existingMatches[0].rawLocal || existingMatches[0].wms;
+
+                return (
+                  <div
+                    className={`p-2.5 rounded-xl border text-[11px] flex flex-wrap items-center justify-between gap-2 ${
+                      sameSpot
+                        ? 'bg-indigo-500/10 border-indigo-500/35 text-indigo-700 dark:text-indigo-200'
+                        : 'bg-amber-500/15 border-amber-500/40 text-amber-800 dark:text-amber-200'
+                    }`}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="font-bold">
+                        {sameSpot
+                          ? `🛡️ Anti-Duplicidade: SKU já salvo neste mesmo endereço (${existingLabel})`
+                          : `⚠️ SKU já existe no endereço ${existingLabel}`}
+                      </p>
+                      <p className="text-[10px] opacity-90">
+                        {sameSpot
+                          ? 'Ao salvar, os dados serão atualizados no mesmo lugar sem criar cópia duplicada.'
+                          : 'Para impedir duplicação em dois endereços, salvar aqui substituirá o endereço anterior.'}
+                      </p>
+                    </div>
+                    {!sameSpot && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSkuFormRua(existingMatches[0].rua);
+                          setSkuFormPos(existingMatches[0].pos);
+                          setSkuFormSelectedLevels(
+                            existingMatches.map(m => m.nivel).sort((a, b) => a - b)
+                          );
+                        }}
+                        className="px-2 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10px] shrink-0 transition"
+                      >
+                        📍 Manter em {existingLabel}
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
+
               {/* Address & Multi-level Selector */}
               <div className="p-3 rounded-xl bg-mac-blue/10 border border-mac-blue/30 space-y-2.5">
                 <div className="flex items-center justify-between gap-2">
@@ -8349,7 +8647,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={async () => {
-                      const csv = buildSisplanCsvString(skus, transbordoRegistry);
+                      const csv = buildSisplanCsvString(skus, transbordoRegistry, barraItems);
                       if (!navigator.onLine) {
                         const rec = savePendingOfflineSync(csv, cloudSyncUrl);
                         setPendingOfflineSyncCount(rec.pendingChangesCount);
@@ -8358,35 +8656,16 @@ export default function App() {
                         playMacSound('alert', soundEnabled);
                         showToast(
                           'Sem Conexão — Salvo na Fila Offline',
-                          'Os dados permanecem salvos no dispositivo e serão enviados automaticamente ao reconectar.',
+                          'Os dados permanecem salvos no dispositivo e serão mesclados automaticamente ao reconectar.',
                           '📴'
                         );
                         return;
                       }
-                      setCloudStatus('syncing');
-                      setCloudStatusText('Enviando...');
-                      const ok = await pushStateToCloud(cloudSyncUrl, csv);
-                      if (ok) {
-                        clearPendingOfflineSync();
-                        setPendingOfflineSyncCount(0);
-                      } else {
-                        const rec = savePendingOfflineSync(csv, cloudSyncUrl);
-                        setPendingOfflineSyncCount(rec.pendingChangesCount);
-                      }
-                      setCloudStatus(ok ? 'ok' : 'error');
-                      setCloudStatusText(ok ? 'Sincronizado!' : 'Falha na Rede (Na Fila)');
-                      playMacSound(ok ? 'success' : 'alert', soundEnabled);
-                      showToast(
-                        ok ? 'Nuvem Google Atualizada!' : 'Aviso de Conexão',
-                        ok
-                          ? 'Todos os dados foram gravados na Planilha Google.'
-                          : 'Salvo localmente na fila de sincronização automática.',
-                        '☁️'
-                      );
+                      await flushPendingOfflineSync(true, csv);
                     }}
                     className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-xs shadow transition shrink-0"
                   >
-                    ☁️ Sincronizar Agora
+                    ☁️ Sincronizar Agora (Mesclar)
                   </button>
                   <button
                     type="button"
@@ -8399,6 +8678,10 @@ export default function App() {
                         );
                         return;
                       }
+                      if (pendingOfflineSyncCount > 0 || loadPendingOfflineSync()) {
+                        await flushPendingOfflineSync(true);
+                        return;
+                      }
                       setCloudStatus('syncing');
                       setCloudStatusText('Baixando...');
                       const data = await pullStateFromCloud(cloudSyncUrl);
@@ -8407,6 +8690,7 @@ export default function App() {
                         setSkus(res.skus);
                         setBarraItems(res.barraItems);
                         setTransbordoRegistry(res.transbordoRegistry);
+                        saveCloudSyncBaseCsv(data.csv);
                         clearPendingOfflineSync();
                         setPendingOfflineSyncCount(0);
                         setCloudStatus('ok');
@@ -8905,13 +9189,26 @@ export default function App() {
       )}
 
       {/* ==================================================================== */}
+      {/* MODAL 12: MULTI-DEVICE OFFLINE SYNC CONFLICT RESOLVER               */}
+      {/* ==================================================================== */}
+      <SyncConflictModal
+        isOpen={showSyncConflictModal}
+        mergeResult={pendingSyncMerge}
+        isApplying={isResolvingConflicts}
+        onResolve={handleResolveSyncConflicts}
+        onCancel={() => setShowSyncConflictModal(false)}
+      />
+
+      {/* ==================================================================== */}
       {/* FLOATING PWA OFFLINE & RECONNECT SYNC BANNER                         */}
       {/* ==================================================================== */}
       <OfflineSyncBanner
         isOnline={isOnline}
         pendingCount={pendingOfflineSyncCount}
         isSyncing={isSyncingOfflineQueue}
+        conflictsCount={pendingSyncMerge?.conflicts.length || 0}
         onSyncNow={() => flushPendingOfflineSync(true)}
+        onOpenConflicts={() => setShowSyncConflictModal(true)}
       />
 
       {/* ==================================================================== */}
