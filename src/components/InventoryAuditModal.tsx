@@ -1,10 +1,17 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   SkuItem,
   STREETS,
-  isReservedCol35Street
+  isReservedCol35Street,
+  getCanonicalSkuKey
 } from '../constants/wmsConstants';
 import { triggerCsvDownload, buildOperatorMisplacedGuideCsv } from '../utils/storageAndSync';
+import {
+  AddressMapDuplicateScanResult,
+  scanAddressMapForDuplicateSkus
+} from '../utils/auditScanner';
+
+export type AuditTypeFilter = 'ALL' | 'CONFLITO' | 'INVASOR' | 'FRAGMENTADO' | 'HIGH_RISK';
 
 export interface InventoryAuditModalProps {
   isOpen: boolean;
@@ -21,7 +28,10 @@ export interface InventoryAuditModalProps {
     lowStockSlots: Set<string>;
   };
   addressMap: Map<string, SkuItem[]>;
+  duplicateSkuScan?: AddressMapDuplicateScanResult;
+  initialTypeFilter?: AuditTypeFilter;
   onNavigateToSlot?: (wms: string, rua: string) => void;
+  onConsolidateDuplicateSku?: (skuKey: string, keepTowerKey: string) => void;
 }
 
 export interface AuditRecord {
@@ -57,12 +67,38 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
   wmsPerspective,
   conflictAnalysis,
   addressMap,
-  onNavigateToSlot
+  duplicateSkuScan,
+  initialTypeFilter,
+  onNavigateToSlot,
+  onConsolidateDuplicateSku
 }) => {
   const [selectedRuaFilter, setSelectedRuaFilter] = useState<string>('ALL');
-  const [selectedTypeFilter, setSelectedTypeFilter] = useState<'ALL' | 'CONFLITO' | 'INVASOR' | 'FRAGMENTADO' | 'HIGH_RISK'>('ALL');
+  const [selectedTypeFilter, setSelectedTypeFilter] = useState<AuditTypeFilter>(
+    initialTypeFilter || 'ALL'
+  );
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [copiedNotification, setCopiedNotification] = useState<boolean>(false);
+  const [duplicateAlertExpanded, setDuplicateAlertExpanded] = useState<boolean>(true);
+  const [showAllDuplicateAlerts, setShowAllDuplicateAlerts] = useState<boolean>(false);
+  const [pendingConsolidation, setPendingConsolidation] = useState<{
+    skuKey: string;
+    keepTowerKey: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (isOpen && initialTypeFilter) {
+      setSelectedTypeFilter(initialTypeFilter);
+    }
+    if (!isOpen) {
+      setPendingConsolidation(null);
+    }
+  }, [isOpen, initialTypeFilter]);
+
+  // Automatic scan of addressMap (uses precomputed result from App when available)
+  const resolvedDuplicateScan = useMemo(() => {
+    if (duplicateSkuScan) return duplicateSkuScan;
+    return scanAddressMapForDuplicateSkus(addressMap);
+  }, [duplicateSkuScan, addressMap]);
 
   // Active items based on current perspective
   const activeItems = useMemo(() => {
@@ -165,21 +201,76 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
       }
     }
 
-    // 3. Conflitos de Fragmentação (Mesmo SKU espalhado em múltiplas torres distintas)
+    // 3. SKUs Idênticos em Endereços Diferentes (Varredura Automática do addressMap)
+    for (const dupEntry of resolvedDuplicateScan.duplicates) {
+      for (const loc of dupEntry.locations) {
+        const otherLocations = dupEntry.locations
+          .filter(other => other.towerKey !== loc.towerKey)
+          .map(other => `${other.formattedRange} (Rua ${other.rua})`);
+
+        for (const item of loc.items) {
+          const dupRecId = `dup-addr-${dupEntry.skuKey}-${item.wms}-${item.id}`;
+          const alreadyAdded = list.some(r => r.id === dupRecId);
+          if (alreadyAdded) continue;
+
+          const rua = loc.rua || item.rua || item.wms.split('.')[0] || '—';
+          const diagnosticMsg =
+            otherLocations.length > 0
+              ? `SKU idêntico também salvo em: ${otherLocations.join(' • ')}`
+              : `SKU idêntico duplicado na mesma célula WMS (${item.wms})`;
+
+          list.push({
+            id: dupRecId,
+            category: 'SKU_FRAGMENTADO',
+            badgeLabel:
+              dupEntry.severity === 'cross_street'
+                ? '🔁 SKU Duplicado (Ruas Diferentes)'
+                : dupEntry.severity === 'same_street_diff_tower'
+                ? '🔁 SKU Duplicado (Endereços Diferentes)'
+                : '🔁 SKU Duplicado (Mesmo Endereço)',
+            badgeClass: 'bg-purple-500/15 border-purple-500/40 text-purple-700 dark:text-purple-300',
+            icon: '🔁',
+            rua,
+            wms: item.wms,
+            skuCode: item.code,
+            skuName: item.name || 'Produto sem descrição',
+            brand: item.brand || '—',
+            colorCode: item.colorCode || '—',
+            colorName: item.colorName || '—',
+            colorHex: item.colorHex || '#94A3B8',
+            size: item.size || '—',
+            qty: typeof item.qty === 'number' ? item.qty : 1,
+            localCadastro: item.localCadastroRaw || item.rawLocal || '—',
+            localAtual: item.wms,
+            colecao: item.colecao || '—',
+            deposito: item.deposito || '2',
+            diagnostico: diagnosticMsg,
+            itemRef: item,
+            isHighRisk: highRiskSlots.has(item.wms)
+          });
+        }
+      }
+    }
+
+    // Fallback: garante que qualquer SKU sinalizado em conflictAnalysis.splitSkus com chave canônica também conste
     for (const item of activeItems) {
       if (item.isTransbordo) continue;
-      const canonical = item.code.trim().toUpperCase();
-      if (conflictAnalysis.splitSkus.has(canonical)) {
-        // If not already in the list as overlap or invader for this slot
-        const isAlreadyListedForSlot = list.some(r => r.wms === item.wms && r.itemRef.id === item.id);
+      const canonical = getCanonicalSkuKey(item.code);
+      if (
+        conflictAnalysis.splitSkus.has(canonical) &&
+        !resolvedDuplicateScan.duplicateSkuKeys.has(canonical)
+      ) {
+        const isAlreadyListedForSlot = list.some(
+          r => r.category === 'SKU_FRAGMENTADO' && r.wms === item.wms && r.itemRef.id === item.id
+        );
         if (!isAlreadyListedForSlot) {
           const rua = item.rua || item.wms.split('.')[0] || '—';
           list.push({
             id: `split-${item.id}`,
             category: 'SKU_FRAGMENTADO',
-            badgeLabel: '🔀 SKU Fragmentado (Múltiplas Torres)',
+            badgeLabel: '🔁 SKU Duplicado (Múltiplas Torres)',
             badgeClass: 'bg-purple-500/15 border-purple-500/40 text-purple-700 dark:text-purple-300',
-            icon: '🔀',
+            icon: '🔁',
             rua,
             wms: item.wms,
             skuCode: item.code,
@@ -203,7 +294,7 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
     }
 
     return list;
-  }, [activeItems, conflictAnalysis, addressMap, highRiskSlots]);
+  }, [activeItems, conflictAnalysis, addressMap, highRiskSlots, resolvedDuplicateScan]);
 
   // Available streets with discrepancy counts
   const streetDiscrepancyCounts = useMemo(() => {
@@ -478,6 +569,196 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
         </div>
 
         {/* ============================================================== */}
+        {/* AUTOMATIC ADDRESSMAP DUPLICATE SKU VERIFICATION ALERT          */}
+        {/* ============================================================== */}
+        <div className="px-4 pt-3 pb-1 bg-white/50 dark:bg-white/[0.02] border-b border-black/10 dark:border-white/10 shrink-0">
+          {resolvedDuplicateScan.duplicates.length > 0 ? (
+            <div className="rounded-2xl border-2 border-rose-500/45 bg-gradient-to-r from-rose-500/12 via-amber-500/10 to-purple-500/12 dark:from-rose-950/50 dark:via-amber-950/35 dark:to-purple-950/45 shadow-sm overflow-hidden">
+              <div className="px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-start sm:items-center gap-2.5 min-w-0">
+                  <span className="relative flex h-3 w-3 shrink-0 mt-1 sm:mt-0">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-500 opacity-75" />
+                    <span className="relative inline-flex rounded-full h-3 w-3 bg-rose-600" />
+                  </span>
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-xs sm:text-sm font-extrabold text-rose-700 dark:text-rose-300">
+                        Alerta Automático: SKUs Idênticos em Endereços Diferentes
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-black bg-rose-600 text-white shadow-xs">
+                        {resolvedDuplicateScan.duplicates.length} SKU(s) •{' '}
+                        {resolvedDuplicateScan.affectedSlots.size} Endereço(s)
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-600 dark:text-slate-300 mt-0.5">
+                      Varredura automática do <code className="font-mono font-bold">addressMap</code> (
+                      {resolvedDuplicateScan.scannedSlotsCount} posições /{' '}
+                      {resolvedDuplicateScan.uniqueSkusScanned} SKUs únicos) detectou códigos idênticos salvos em locais distintos.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedTypeFilter('FRAGMENTADO');
+                      setSelectedRuaFilter('ALL');
+                    }}
+                    className="px-2.5 py-1 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold transition shadow-xs"
+                  >
+                    Filtrar na Tabela
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDuplicateAlertExpanded(prev => !prev)}
+                    className="px-2.5 py-1 rounded-xl bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/15 text-[11px] font-bold text-slate-700 dark:text-slate-200 transition"
+                  >
+                    {duplicateAlertExpanded ? 'Ocultar Lista ▲' : 'Ver Detalhes ▼'}
+                  </button>
+                </div>
+              </div>
+
+              {duplicateAlertExpanded && (
+                <div className="px-3.5 pb-3 pt-1 border-t border-rose-500/20 max-h-48 overflow-y-auto space-y-2">
+                  {(showAllDuplicateAlerts
+                    ? resolvedDuplicateScan.duplicates
+                    : resolvedDuplicateScan.duplicates.slice(0, 6)
+                  ).map(dup => (
+                    <div
+                      key={dup.skuKey}
+                      className="rounded-xl bg-white/80 dark:bg-slate-900/75 border border-rose-500/25 px-3 py-2 flex flex-col lg:flex-row lg:items-center justify-between gap-2"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span
+                          className="w-3 h-3 rounded-full border border-black/30 shrink-0"
+                          style={{ backgroundColor: dup.colorHex }}
+                          title={`${dup.colorCode} - ${dup.colorName}`}
+                        />
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="font-mono font-extrabold text-xs text-slate-900 dark:text-slate-100">
+                              {dup.skuCode}
+                            </span>
+                            <span
+                              className={`px-1.5 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-wide ${
+                                dup.severity === 'cross_street'
+                                  ? 'bg-rose-600 text-white'
+                                  : dup.severity === 'same_street_diff_tower'
+                                  ? 'bg-amber-500/20 text-amber-800 dark:text-amber-300 border border-amber-500/40'
+                                  : 'bg-purple-500/20 text-purple-800 dark:text-purple-300 border border-purple-500/40'
+                              }`}
+                            >
+                              {dup.severityLabel}
+                            </span>
+                            <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400">
+                              {dup.totalQty} pçs total
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                            {dup.skuName}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                        {dup.locations.map(loc => {
+                          const isConfirming =
+                            pendingConsolidation?.skuKey === dup.skuKey &&
+                            pendingConsolidation?.keepTowerKey === loc.towerKey;
+                          return (
+                            <div
+                              key={`${dup.skuKey}-${loc.towerKey}`}
+                              className="inline-flex items-center rounded-lg border border-black/10 dark:border-white/15 bg-slate-100/90 dark:bg-slate-800/90 overflow-hidden"
+                            >
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onNavigateToSlot && onNavigateToSlot(loc.addresses[0], loc.rua)
+                                }
+                                className="px-2 py-1 text-[11px] font-mono font-bold text-slate-800 dark:text-slate-100 hover:bg-mac-blue hover:text-white transition flex items-center gap-1"
+                                title={`Ir para ${loc.formattedRange} no mapa (${loc.totalQty} pçs)`}
+                              >
+                                <span>🎯</span>
+                                <span>{loc.formattedRange}</span>
+                                <span className="text-[9px] opacity-75">({loc.totalQty})</span>
+                              </button>
+                              {onConsolidateDuplicateSku && dup.locations.length > 1 && (
+                                isConfirming ? (
+                                  <div className="flex items-center border-l border-black/10 dark:border-white/15 bg-rose-600 text-white">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        onConsolidateDuplicateSku(dup.skuKey, loc.towerKey);
+                                        setPendingConsolidation(null);
+                                      }}
+                                      className="px-1.5 py-1 text-[10px] font-extrabold hover:bg-rose-700 transition"
+                                      title={`Confirmar: manter ${dup.skuCode} apenas em ${loc.formattedRange} e remover dos outros endereços`}
+                                    >
+                                      ✓ Manter
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setPendingConsolidation(null)}
+                                      className="px-1.5 py-1 text-[10px] font-bold hover:bg-rose-800 border-l border-white/20 transition"
+                                      title="Cancelar"
+                                    >
+                                      ✕
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setPendingConsolidation({
+                                        skuKey: dup.skuKey,
+                                        keepTowerKey: loc.towerKey
+                                      })
+                                    }
+                                    className="px-1.5 py-1 text-[10px] font-semibold text-emerald-700 dark:text-emerald-400 hover:bg-emerald-600 hover:text-white border-l border-black/10 dark:border-white/15 transition"
+                                    title={`Manter este SKU apenas em ${loc.formattedRange} e remover duplicatas dos outros endereços`}
+                                  >
+                                    Manter só aqui
+                                  </button>
+                                )
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+
+                  {resolvedDuplicateScan.duplicates.length > 6 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAllDuplicateAlerts(prev => !prev)}
+                      className="w-full py-1.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-700 dark:text-rose-300 text-[11px] font-bold transition"
+                    >
+                      {showAllDuplicateAlerts
+                        ? 'Mostrar menos'
+                        : `Mostrar todos os ${resolvedDuplicateScan.duplicates.length} SKUs duplicados`}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="mb-2 px-3.5 py-2 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2 text-emerald-800 dark:text-emerald-300 font-semibold">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                <span>
+                  Verificação Automática do <code className="font-mono font-bold">addressMap</code>: nenhum código de SKU idêntico salvo em endereços diferentes.
+                </span>
+              </div>
+              <span className="font-mono text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-bold">
+                {resolvedDuplicateScan.scannedSlotsCount} posições • {resolvedDuplicateScan.uniqueSkusScanned} SKUs verificados
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* ============================================================== */}
         {/* SUMMARY KPI CARDS                                              */}
         {/* ============================================================== */}
         <div className="p-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 bg-white/40 dark:bg-white/[0.02] border-b border-black/10 dark:border-white/10 shrink-0">
@@ -511,43 +792,88 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
             <span className="text-2xl animate-pulse">🔥</span>
           </div>
 
-          <div className="p-3 rounded-2xl bg-rose-500/10 border border-rose-500/25 flex items-center justify-between">
+          <div
+            onClick={() => setSelectedTypeFilter(prev => prev === 'CONFLITO' ? 'ALL' : 'CONFLITO')}
+            className={`p-3 rounded-2xl border transition cursor-pointer flex items-center justify-between ${
+              selectedTypeFilter === 'CONFLITO'
+                ? 'bg-rose-600 text-white border-rose-400 shadow-md ring-2 ring-rose-400/50'
+                : 'bg-rose-500/10 hover:bg-rose-500/15 border-rose-500/25'
+            }`}
+            title="Clique para filtrar Sobreposições na mesma célula"
+          >
             <div>
-              <span className="text-[10px] font-bold uppercase tracking-wider text-rose-600 dark:text-rose-400">
+              <span className={`text-[10px] font-bold uppercase tracking-wider ${
+                selectedTypeFilter === 'CONFLITO' ? 'text-white' : 'text-rose-600 dark:text-rose-400'
+              }`}>
                 Sobreposições
               </span>
-              <div className="font-mono text-xl font-extrabold text-rose-700 dark:text-rose-200 mt-0.5">
+              <div className={`font-mono text-xl font-extrabold mt-0.5 ${
+                selectedTypeFilter === 'CONFLITO' ? 'text-white' : 'text-rose-700 dark:text-rose-200'
+              }`}>
                 {summaryKpis.countOverlaps}
               </div>
-              <p className="text-[10px] text-rose-600/80">Múltiplos SKUs na célula</p>
+              <p className={`text-[10px] ${
+                selectedTypeFilter === 'CONFLITO' ? 'text-white/80' : 'text-rose-600/80'
+              }`}>Múltiplos SKUs na célula</p>
             </div>
             <span className="text-2xl">🚨</span>
           </div>
 
-          <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-between">
+          <div
+            onClick={() => setSelectedTypeFilter(prev => prev === 'INVASOR' ? 'ALL' : 'INVASOR')}
+            className={`p-3 rounded-2xl border transition cursor-pointer flex items-center justify-between ${
+              selectedTypeFilter === 'INVASOR'
+                ? 'bg-amber-600 text-white border-amber-400 shadow-md ring-2 ring-amber-400/50'
+                : 'bg-amber-500/10 hover:bg-amber-500/15 border-amber-500/25'
+            }`}
+            title="Clique para filtrar SKUs Invasores fora do local cadastrado"
+          >
             <div>
-              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400">
+              <span className={`text-[10px] font-bold uppercase tracking-wider ${
+                selectedTypeFilter === 'INVASOR' ? 'text-white' : 'text-amber-600 dark:text-amber-400'
+              }`}>
                 SKUs Invasores
               </span>
-              <div className="font-mono text-xl font-extrabold text-amber-700 dark:text-amber-200 mt-0.5">
+              <div className={`font-mono text-xl font-extrabold mt-0.5 ${
+                selectedTypeFilter === 'INVASOR' ? 'text-white' : 'text-amber-700 dark:text-amber-200'
+              }`}>
                 {summaryKpis.countInvaders}
               </div>
-              <p className="text-[10px] text-amber-600/80">Fora do local cadastrado</p>
+              <p className={`text-[10px] ${
+                selectedTypeFilter === 'INVASOR' ? 'text-white/80' : 'text-amber-600/80'
+              }`}>Fora do local cadastrado</p>
             </div>
             <span className="text-2xl">⚠️</span>
           </div>
 
-          <div className="p-3 rounded-2xl bg-purple-500/10 border border-purple-500/25 flex items-center justify-between">
+          <div
+            onClick={() => setSelectedTypeFilter(prev => prev === 'FRAGMENTADO' ? 'ALL' : 'FRAGMENTADO')}
+            className={`p-3 rounded-2xl border transition cursor-pointer flex items-center justify-between ${
+              selectedTypeFilter === 'FRAGMENTADO'
+                ? 'bg-purple-600 text-white border-purple-400 shadow-md ring-2 ring-purple-400/50'
+                : 'bg-purple-500/10 hover:bg-purple-500/15 border-purple-500/25'
+            }`}
+            title="Clique para filtrar SKUs idênticos salvos em endereços/torres diferentes"
+          >
             <div>
-              <span className="text-[10px] font-bold uppercase tracking-wider text-purple-600 dark:text-purple-400">
-                Fragmentados
+              <span className={`text-[10px] font-bold uppercase tracking-wider ${
+                selectedTypeFilter === 'FRAGMENTADO' ? 'text-white' : 'text-purple-600 dark:text-purple-400'
+              }`}>
+                SKUs Duplicados
               </span>
-              <div className="font-mono text-xl font-extrabold text-purple-700 dark:text-purple-200 mt-0.5">
-                {summaryKpis.countSplits}
+              <div className={`font-mono text-xl font-extrabold mt-0.5 ${
+                selectedTypeFilter === 'FRAGMENTADO' ? 'text-white' : 'text-purple-700 dark:text-purple-200'
+              }`}>
+                {resolvedDuplicateScan.duplicates.length}
+                <span className="text-xs font-semibold opacity-75 ml-1">
+                  ({summaryKpis.countSplits} slots)
+                </span>
               </div>
-              <p className="text-[10px] text-purple-600/80">Dividido em várias torres</p>
+              <p className={`text-[10px] ${
+                selectedTypeFilter === 'FRAGMENTADO' ? 'text-white/80' : 'text-purple-600/80'
+              }`}>Salvos em endereços diferentes</p>
             </div>
-            <span className="text-2xl">🔀</span>
+            <span className="text-2xl">🔁</span>
           </div>
 
           <div className="p-3 rounded-2xl bg-mac-blue/10 border border-mac-blue/25 flex items-center justify-between">
@@ -664,13 +990,24 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
               <button
                 type="button"
                 onClick={() => setSelectedTypeFilter('FRAGMENTADO')}
-                className={`px-2 py-0.5 rounded-lg font-semibold transition ${
+                className={`px-2 py-0.5 rounded-lg font-semibold transition flex items-center space-x-1 ${
                   selectedTypeFilter === 'FRAGMENTADO'
                     ? 'bg-purple-600 text-white shadow-xs'
                     : 'text-slate-500 hover:text-purple-600'
                 }`}
               >
-                🔀 Fragmentados
+                <span>🔁 Duplicados</span>
+                {resolvedDuplicateScan.duplicates.length > 0 && (
+                  <span
+                    className={`px-1.5 py-0.2 rounded-full text-[10px] font-extrabold ${
+                      selectedTypeFilter === 'FRAGMENTADO'
+                        ? 'bg-black/30 text-white'
+                        : 'bg-purple-500/20 text-purple-700 dark:text-purple-300'
+                    }`}
+                  >
+                    {resolvedDuplicateScan.duplicates.length}
+                  </span>
+                )}
               </button>
             </div>
 

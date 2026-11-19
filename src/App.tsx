@@ -70,8 +70,9 @@ import {
   ThreeWayMergeResult
 } from './utils/storageAndSync';
 import { ReportModal } from './components/ReportModal';
-import { InventoryAuditModal } from './components/InventoryAuditModal';
+import { InventoryAuditModal, AuditTypeFilter } from './components/InventoryAuditModal';
 import { AutoSaveModal } from './components/AutoSaveModal';
+import { scanAddressMapForDuplicateSkus } from './utils/auditScanner';
 import { MovementHistoryModal } from './components/MovementHistoryModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ExecutiveDashboard } from './components/ExecutiveDashboard';
@@ -228,6 +229,8 @@ export default function App() {
   const [showAboutModal, setShowAboutModal] = useState<boolean>(false);
   const [showReportModal, setShowReportModal] = useState<boolean>(false);
   const [showAuditModal, setShowAuditModal] = useState<boolean>(false);
+  const [auditInitialFilter, setAuditInitialFilter] = useState<AuditTypeFilter>('ALL');
+  const prevDuplicateSkusCountRef = useRef<number>(0);
   const [showAutoSaveModal, setShowAutoSaveModal] = useState<boolean>(false);
   const [showMovementHistoryModal, setShowMovementHistoryModal] = useState<boolean>(false);
   const [showExportAddressesModal, setShowExportAddressesModal] = useState<boolean>(false);
@@ -1210,12 +1213,9 @@ export default function App() {
     return map;
   }, [activeItems, transbordoRegistry]);
 
-  // Conflict & Multi-level analysis
+  // Conflict, Multi-level & Automatic Duplicate SKU scan directly over addressMap
   const conflictAnalysis = useMemo(() => {
     const overlappedSlots = new Set<string>();
-    const skuTowersMap = new Map<string, Set<string>>();
-    const splitSkus = new Set<string>();
-    const splitSkuSlots = new Set<string>();
     const invaderSlots = new Set<string>();
     const lowStockSlots = new Set<string>();
 
@@ -1237,28 +1237,10 @@ export default function App() {
       }
     }
 
-    for (const item of skus) {
-      if (item.isTransbordo || isPulmaoStreet(item.rua)) continue;
-      const key = getCanonicalSkuKey(item.code);
-      const tower = `${item.rua}.${String(item.pos).padStart(3, '0')}`;
-      if (!skuTowersMap.has(key)) skuTowersMap.set(key, new Set());
-      skuTowersMap.get(key)!.add(tower);
-    }
-
-    for (const [skuKey, towers] of skuTowersMap.entries()) {
-      if (towers.size > 1) {
-        splitSkus.add(skuKey);
-      }
-    }
-
-    if (splitSkus.size > 0) {
-      for (const item of skus) {
-        if (splitSkus.has(getCanonicalSkuKey(item.code))) {
-          splitSkuSlots.add(item.wms);
-        }
-      }
-    }
-
+    // Automatic verification scanning addressMap for identical SKU codes saved in different addresses
+    const duplicateSkuScan = scanAddressMapForDuplicateSkus(addressMap);
+    const splitSkus = duplicateSkuScan.duplicateSkuKeys;
+    const splitSkuSlots = duplicateSkuScan.affectedSlots;
     const allConflictSlots = new Set<string>([...overlappedSlots, ...splitSkuSlots]);
 
     return {
@@ -1267,9 +1249,71 @@ export default function App() {
       splitSkuSlots,
       allConflictSlots,
       invaderSlots,
-      lowStockSlots
+      lowStockSlots,
+      duplicateSkuScan
     };
-  }, [addressMap, skus]);
+  }, [addressMap]);
+
+  // Alerta automático quando a varredura do addressMap detecta novos SKUs idênticos em endereços diferentes
+  useEffect(() => {
+    const dupCount = conflictAnalysis.duplicateSkuScan.duplicates.length;
+    if (dupCount > prevDuplicateSkusCountRef.current) {
+      const affectedCount = conflictAnalysis.duplicateSkuScan.affectedSlots.size;
+      playMacSound('alert', soundEnabled);
+      showToast(
+        `Alerta de Auditoria: ${dupCount} SKU(s) Duplicado(s)`,
+        `${dupCount} código(s) de SKU idêntico(s) encontrados em ${affectedCount} endereços diferentes no addressMap. Abra a Auditoria de Inventário para revisar.`,
+        '🔁'
+      );
+    }
+    prevDuplicateSkusCountRef.current = dupCount;
+  }, [
+    conflictAnalysis.duplicateSkuScan.duplicates.length,
+    conflictAnalysis.duplicateSkuScan.affectedSlots.size,
+    soundEnabled,
+    showToast
+  ]);
+
+  // Consolida um SKU duplicado mantendo apenas a torre escolhida pelo operador na interface de auditoria
+  const handleConsolidateDuplicateSku = useCallback(
+    (skuKey: string, keepTowerKey: string) => {
+      if (wmsPerspective !== 'sku') return;
+      const removedAddresses: string[] = [];
+      let sampleCode = skuKey;
+
+      const keptSkus = skus.filter(item => {
+        if (item.isTransbordo) return true;
+        if (getCanonicalSkuKey(item.code) !== skuKey) return true;
+        sampleCode = item.code;
+        const itemTower = `${item.rua}.${String(item.pos).padStart(3, '0')}`;
+        if (itemTower === keepTowerKey) return true;
+        removedAddresses.push(item.wms);
+        return false;
+      });
+
+      if (removedAddresses.length === 0) return;
+
+      const cleanSkus = deduplicateSkuItems(keptSkus).items;
+      setSkus(cleanSkus);
+      persistCurrentState(cleanSkus, movedSkusRegistry, transbordoRegistry, barraItems, undefined, true);
+      playMacSound('success', soundEnabled);
+      showToast(
+        'Duplicidade Consolidada',
+        `SKU ${sampleCode} mantido exclusivamente em ${keepTowerKey} (${removedAddresses.length} endereço(s) duplicado(s) removido(s)).`,
+        '✅'
+      );
+    },
+    [
+      wmsPerspective,
+      skus,
+      movedSkusRegistry,
+      transbordoRegistry,
+      barraItems,
+      persistCurrentState,
+      soundEnabled,
+      showToast
+    ]
+  );
 
   // Street statistics for Macro Strip & KPIs (using precomputed static slot index)
   const streetStats = useMemo(() => {
@@ -4272,6 +4316,7 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     setOpenMenu(null);
+                    setAuditInitialFilter('ALL');
                     setShowAuditModal(true);
                   }}
                   className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-mac-blue hover:text-white transition flex items-center justify-between gap-2 font-bold text-rose-600 dark:text-rose-400 hover:text-white"
@@ -4559,7 +4604,10 @@ export default function App() {
             showToast('Histórico Restaurado', 'Curva de evolução D3 redefinida para o padrão.', '🔄');
           }}
           onNavigateToConflict={navigateToConflict}
-          onOpenInventoryAudit={() => setShowAuditModal(true)}
+          onOpenInventoryAudit={() => {
+            setAuditInitialFilter('ALL');
+            setShowAuditModal(true);
+          }}
           onExportMisplacedGuide={exportBarraInvadersGuideCsv}
           onOpenSpotlight={() => {
             setShowSpotlight(true);
@@ -4658,6 +4706,24 @@ export default function App() {
                     {conflictAnalysis.allConflictSlots.size}
                   </strong>
                   <span className="text-[10px] bg-rose-500 text-white px-1.5 py-0.2 rounded font-bold">Ir ➜</span>
+                </button>
+              )}
+              {conflictAnalysis.duplicateSkuScan.duplicates.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuditInitialFilter('FRAGMENTADO');
+                    setShowAuditModal(true);
+                  }}
+                  title="Verificação automática do addressMap: SKUs idênticos salvos em endereços diferentes — clique para abrir a Auditoria"
+                  className="px-2.5 py-1 rounded-lg bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/45 flex items-center space-x-1.5 transition whitespace-nowrap shrink-0"
+                >
+                  <span className="w-2 h-2 rounded-full bg-purple-500 animate-pulse shrink-0" />
+                  <span className="text-purple-700 dark:text-purple-300 font-semibold">SKUs Duplicados:</span>
+                  <strong className="font-extrabold text-purple-700 dark:text-purple-200">
+                    {conflictAnalysis.duplicateSkuScan.duplicates.length}
+                  </strong>
+                  <span className="text-[10px] bg-purple-600 text-white px-1.5 py-0.2 rounded font-bold">Auditar</span>
                 </button>
               )}
             </div>
@@ -9087,6 +9153,11 @@ export default function App() {
           wmsPerspective={wmsPerspective}
           conflictAnalysis={conflictAnalysis}
           addressMap={addressMap}
+          duplicateSkuScan={conflictAnalysis.duplicateSkuScan}
+          initialTypeFilter={auditInitialFilter}
+          onConsolidateDuplicateSku={
+            wmsPerspective === 'sku' ? handleConsolidateDuplicateSku : undefined
+          }
           onNavigateToSlot={(wms, rua) => {
             setShowAuditModal(false);
             setSelectedStreet(rua);
