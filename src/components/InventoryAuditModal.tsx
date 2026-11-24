@@ -8,7 +8,8 @@ import {
 import { triggerCsvDownload, buildOperatorMisplacedGuideCsv } from '../utils/storageAndSync';
 import {
   AddressMapDuplicateScanResult,
-  scanAddressMapForDuplicateSkus
+  scanAddressMapForDuplicateSkus,
+  buildDuplicateSkusSisplanCsv
 } from '../utils/auditScanner';
 
 export type AuditTypeFilter = 'ALL' | 'CONFLITO' | 'INVASOR' | 'FRAGMENTADO' | 'HIGH_RISK';
@@ -78,6 +79,7 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
   );
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [copiedNotification, setCopiedNotification] = useState<boolean>(false);
+  const [duplicateCsvExported, setDuplicateCsvExported] = useState<boolean>(false);
   const [duplicateAlertExpanded, setDuplicateAlertExpanded] = useState<boolean>(true);
   const [showAllDuplicateAlerts, setShowAllDuplicateAlerts] = useState<boolean>(false);
   const [pendingConsolidation, setPendingConsolidation] = useState<{
@@ -427,6 +429,29 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
     triggerCsvDownload(csvContent, filename);
   };
 
+  // Duplicate SKUs matching current street filter (retaining all conflicting locations per SKU)
+  const duplicateSkusForExport = useMemo(() => {
+    if (selectedRuaFilter === 'ALL') return resolvedDuplicateScan.duplicates;
+    return resolvedDuplicateScan.duplicates.filter(d =>
+      d.distinctStreets.includes(selectedRuaFilter)
+    );
+  }, [resolvedDuplicateScan.duplicates, selectedRuaFilter]);
+
+  // Export ONLY duplicated SKUs and all their conflicting locations in SISPLAN-compatible CSV format
+  const handleExportDuplicateSkusCsv = () => {
+    const res = buildDuplicateSkusSisplanCsv(
+      resolvedDuplicateScan.duplicates,
+      selectedRuaFilter
+    );
+    if (res.rowCount === 0) return;
+
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const streetTag = selectedRuaFilter === 'ALL' ? 'todas_ruas' : `rua_${selectedRuaFilter}`;
+    triggerCsvDownload(res.csv, `sisplan_skus_duplicados_${streetTag}_${todayStr}.csv`);
+    setDuplicateCsvExported(true);
+    setTimeout(() => setDuplicateCsvExported(false), 2500);
+  };
+
   // Export Guia do Operador (Onde Tirar ➔ Onde Guardar ou S/Cadastro)
   const handleExportOperatorGuide = () => {
     const res = buildOperatorMisplacedGuideCsv(skus, barraItems, conflictAnalysis.allConflictSlots);
@@ -514,8 +539,26 @@ export const InventoryAuditModal: React.FC<InventoryAuditModalProps> = ({
             </div>
           </div>
 
-          {/* Action Buttons: Export CSV, Copy TSV, Print, Close */}
-          <div className="flex items-center space-x-2">
+          {/* Action Buttons: Export Duplicados SISPLAN, Guia Operador, Export CSV, Copy TSV, Print, Close */}
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleExportDuplicateSkusCsv}
+              disabled={duplicateSkusForExport.length === 0}
+              className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold transition flex items-center space-x-1.5 shadow-sm disabled:opacity-40"
+              title="Exportar apenas os SKUs duplicados e todas as suas localizações conflitantes em CSV (formato SISPLAN: CODIGO;COR;TAMANHO;DEPOSITO;LOCAL) para correção em massa"
+            >
+              <span>{duplicateCsvExported ? '✓' : '🔁'}</span>
+              <span className="hidden sm:inline">
+                {duplicateCsvExported ? 'Duplicados Exportados!' : 'Duplicados (SISPLAN CSV)'}
+              </span>
+              {duplicateSkusForExport.length > 0 && !duplicateCsvExported && (
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono font-extrabold bg-black/25 text-white">
+                  {duplicateSkusForExport.length}
+                </span>
+              )}
+            </button>
+
             <button
               type="button"
               onClick={handleExportOperatorGuide}

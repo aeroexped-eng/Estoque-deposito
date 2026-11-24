@@ -269,3 +269,104 @@ export function scanAddressMapForDuplicateSkus(
     scannedAtIso: new Date().toISOString()
   };
 }
+
+export interface DuplicateSkusCsvExportResult {
+  csv: string;
+  skuCount: number;
+  rowCount: number;
+}
+
+function escapeCsvCell(value: string): string {
+  const cleaned = String(value ?? '').replace(/\r?\n/g, ' ').trim();
+  if (cleaned.includes(';') || cleaned.includes('"')) {
+    return `"${cleaned.replace(/"/g, '""')}"`;
+  }
+  return cleaned;
+}
+
+/**
+ * Gera um relatório CSV específico contendo apenas os SKUs duplicados e todas as suas
+ * localizações conflitantes, com as 5 primeiras colunas no layout nativo do SISPLAN
+ * (CODIGO;COR;TAMANHO;DEPOSITO;LOCAL) para facilitar correção em massa.
+ */
+export function buildDuplicateSkusSisplanCsv(
+  duplicates: DuplicateSkuAlertEntry[],
+  ruaFilter?: string
+): DuplicateSkusCsvExportResult {
+  const targetDuplicates =
+    ruaFilter && ruaFilter !== 'ALL'
+      ? duplicates.filter(d => d.distinctStreets.includes(ruaFilter))
+      : duplicates;
+
+  if (targetDuplicates.length === 0) {
+    return { csv: '', skuCount: 0, rowCount: 0 };
+  }
+
+  const headers = [
+    'CODIGO',
+    'COR',
+    'TAMANHO',
+    'DEPOSITO',
+    'LOCAL',
+    'TODOS_OS_LOCAIS_DUPLICADOS',
+    'QTD_LOCAL',
+    'QTD_TOTAL_SKU',
+    'RUA',
+    'TORRE',
+    'TIPO_DUPLICIDADE',
+    'SKU_COMPLETO',
+    'DESCRICAO',
+    'COLECAO',
+    'DATA_AUDITORIA'
+  ];
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const rows: string[] = [];
+
+  for (const dup of targetDuplicates) {
+    const allLocsSummary = dup.locations.map(l => l.formattedRange).join(' | ');
+
+    for (const loc of dup.locations) {
+      const sampleItem = loc.items[0];
+      const rawCodeBase =
+        sampleItem?.codigoBase ||
+        dup.skuCode.split(/\s*-\s*/)[0] ||
+        dup.skuKey.split('|')[0] ||
+        '';
+      const codigoBase = rawCodeBase.replace(/\D/g, '') || rawCodeBase.trim();
+      const rawColor = (sampleItem?.colorCode || dup.colorCode || '').trim();
+      const colorCode = /^\d+$/.test(rawColor) ? rawColor.padStart(3, '0') : rawColor;
+      const size = (sampleItem?.size || dup.size || '').trim();
+      const deposito = (sampleItem?.deposito || dup.deposito || '2').trim();
+
+      rows.push(
+        [
+          escapeCsvCell(codigoBase),
+          escapeCsvCell(colorCode),
+          escapeCsvCell(size),
+          escapeCsvCell(deposito),
+          escapeCsvCell(loc.formattedRange),
+          escapeCsvCell(allLocsSummary),
+          String(loc.totalQty),
+          String(dup.totalQty),
+          escapeCsvCell(loc.rua),
+          escapeCsvCell(loc.towerKey),
+          escapeCsvCell(dup.severityLabel),
+          escapeCsvCell(dup.skuCode),
+          escapeCsvCell(dup.skuName),
+          escapeCsvCell(dup.colecao),
+          todayStr
+        ].join(';')
+      );
+    }
+  }
+
+  // UTF-8 BOM para abertura correta de acentuação no Excel / SISPLAN
+  const csv = '\uFEFF' + [headers.join(';'), ...rows].join('\r\n') + '\r\n';
+  return {
+    csv,
+    skuCount: targetDuplicates.length,
+    rowCount: rows.length
+  };
+}
+

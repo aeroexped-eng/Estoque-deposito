@@ -80,6 +80,7 @@ import { RelocateModal } from './components/RelocateModal';
 import { ExportAddressesModal } from './components/ExportAddressesModal';
 import { PWAInstallButton, OfflineSyncBanner } from './components/PWAInstallButton';
 import { SyncConflictModal } from './components/SyncConflictModal';
+import { TowerInspectionPanel } from './components/TowerInspectionPanel';
 import { useOnlineStatus } from './hooks/usePWA';
 import { ImportHistorySnapshot } from './components/OccupancyEvolutionChart';
 
@@ -213,6 +214,19 @@ export default function App() {
   const [inspectorOpenMobile, setInspectorOpenMobile] = useState<boolean>(false);
   const [sidebarCollapsedDesktop, setSidebarCollapsedDesktop] = useState<boolean>(false);
   const [inspectorCollapsedDesktop, setInspectorCollapsedDesktop] = useState<boolean>(false);
+  const [inspectorMode, setInspectorMode] = useState<'slot' | 'tower'>(() => {
+    try {
+      const saved = localStorage.getItem('estoque_inspector_mode_v1');
+      return saved === 'tower' ? 'tower' : 'slot';
+    } catch {
+      return 'slot';
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('estoque_inspector_mode_v1', inspectorMode);
+    } catch {}
+  }, [inspectorMode]);
   const [rackLayoutMode, setRackLayoutMode] = useState<'columns' | 'matrix'>('columns');
   const [rackTowerFilter, setRackTowerFilter] = useState<string>('ALL');
   const [clockText, setClockText] = useState<string>('');
@@ -1758,6 +1772,77 @@ export default function App() {
       setPulmaoTempQty(first ? first.qty || 1 : 1);
     }
   }, [inspectedSlot]);
+
+  // Tower Inspection Mode: 1-click level switching within the current tower
+  const handleSelectTowerLevel = useCallback(
+    (nivel: number) => {
+      const { rua, pos } = inspectedSlot.parsed;
+      const wms = formatWmsAddress(rua, pos, nivel);
+      const items = addressMap.get(wms) || [];
+      setSelectedAddressKey(wms);
+      setSelectedSkuId(items[0]?.id || null);
+      setQuickActionPanel('none');
+      setInteractiveTargetMode('none');
+      playMacSound('select', soundEnabled);
+    },
+    [inspectedSlot.parsed, addressMap, soundEnabled]
+  );
+
+  // Tower Inspection Mode: navigate to previous/next valid tower in the same street
+  const handleNavigateInspectedTower = useCallback(
+    (nextPos: number) => {
+      const { rua, nivel } = inspectedSlot.parsed;
+      const nextMaxLv = getMaxLevelsForStreet(rua, nextPos);
+      const clampedLv = Math.min(Math.max(1, nivel), nextMaxLv);
+      const wms = formatWmsAddress(rua, nextPos, clampedLv);
+      const items = addressMap.get(wms) || [];
+
+      if (selectedStreet !== rua) {
+        setSelectedStreet(rua);
+      }
+      if (!selectedRangeId.startsWith('ALL')) {
+        const targetRange = ADDRESS_RANGES.find(
+          r => !r.id.startsWith('ALL') && nextPos >= r.start && nextPos <= r.end
+        );
+        if (targetRange && targetRange.id !== selectedRangeId) {
+          setSelectedRangeId(targetRange.id);
+        }
+      }
+
+      setSelectedAddressKey(wms);
+      setSelectedSkuId(items[0]?.id || null);
+      setQuickActionPanel('none');
+      setInteractiveTargetMode('none');
+      playMacSound('pop', soundEnabled);
+    },
+    [inspectedSlot.parsed, addressMap, selectedStreet, selectedRangeId, soundEnabled]
+  );
+
+  // Open lateral inspector directly in Tower Inspection mode for any tower
+  const handleOpenTowerInspection = useCallback(
+    (rua: string, pos: number) => {
+      const maxLv = getMaxLevelsForStreet(rua, pos);
+      let targetLv = 1;
+      for (let lv = 1; lv <= maxLv; lv++) {
+        const w = formatWmsAddress(rua, pos, lv);
+        if ((addressMap.get(w) || []).length > 0 || transbordoRegistry[w]) {
+          targetLv = lv;
+          break;
+        }
+      }
+      const wms = formatWmsAddress(rua, pos, targetLv);
+      const items = addressMap.get(wms) || [];
+      setSelectedAddressKey(wms);
+      setSelectedSkuId(items[0]?.id || null);
+      setInspectorMode('tower');
+      setInspectorCollapsedDesktop(false);
+      if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+        setInspectorOpenMobile(true);
+      }
+      playMacSound('open', soundEnabled);
+    },
+    [addressMap, transbordoRegistry, soundEnabled]
+  );
 
   // Nearby Free and Occupied Slots for 1-Click Inspector Relocation
   const nearbyFreeSlots = useMemo(() => {
@@ -6283,9 +6368,14 @@ export default function App() {
                                   {/* Tower Top Header */}
                                   <div className="px-3 py-2 bg-black/[0.03] dark:bg-white/[0.04] border-b border-black/10 dark:border-white/10 flex items-center justify-between">
                                     <div className="flex items-center gap-1.5">
-                                      <span className="font-mono text-xs font-black text-slate-800 dark:text-slate-100">
-                                        Torre {String(pos).padStart(3, '0')}
-                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleOpenTowerInspection(selectedStreet, pos)}
+                                        className="font-mono text-xs font-black text-slate-800 dark:text-slate-100 hover:text-mac-blue dark:hover:text-mac-blue transition flex items-center gap-1"
+                                        title={`Abrir Inspeção de Torre para ${selectedStreet}.${String(pos).padStart(3, '0')}`}
+                                      >
+                                        <span>🏢 Torre {String(pos).padStart(3, '0')}</span>
+                                      </button>
                                       <span className="font-mono text-[10px] text-mac-blue font-bold px-1.5 py-0.2 rounded bg-mac-blue/10">
                                         {maxLvTower} Andares
                                       </span>
@@ -6728,29 +6818,99 @@ export default function App() {
                     : 'hidden lg:flex w-72 xl:w-88 max-w-[92vw] bg-white/45 dark:bg-black/25 z-10'
               }`}
             >
-              <div className="space-y-4">
-                <div className="flex items-center justify-between border-b border-black/10 dark:border-white/10 pb-2">
-                  <h3 className="font-display font-bold text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                    Inspetor de Endereço
-                  </h3>
-                  <div className="flex items-center space-x-1.5">
-                    <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-mac-blue/15 text-mac-blue font-bold">
-                      {inspectedSlot.parsed.wms}
-                    </span>
+              <div className="space-y-3.5">
+                <div className="space-y-2 border-b border-black/10 dark:border-white/10 pb-2.5">
+                  <div className="flex items-center justify-between gap-1.5">
+                    <h3 className="font-display font-bold text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400 truncate">
+                      {inspectorMode === 'tower' ? 'Inspeção de Torre' : 'Inspetor de Endereço'}
+                    </h3>
+                    <div className="flex items-center space-x-1.5 shrink-0">
+                      <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-mac-blue/15 text-mac-blue font-bold">
+                        {inspectorMode === 'tower'
+                          ? `${inspectedSlot.parsed.rua}.${String(inspectedSlot.parsed.pos).padStart(3, '0')}`
+                          : inspectedSlot.parsed.wms}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setInspectorOpenMobile(false);
+                          setInspectorCollapsedDesktop(true);
+                        }}
+                        className="px-2 py-0.5 rounded-lg bg-black/10 dark:bg-white/10 hover:bg-rose-500 hover:text-white text-xs font-bold transition flex items-center gap-1"
+                        title="Fechar ou recolher inspetor"
+                      >
+                        <span>✕</span>
+                        <span className="text-[10px]">Fechar</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Inspector Mode Segmented Toggle: Endereço vs Inspeção de Torre */}
+                  <div className="grid grid-cols-2 gap-1 p-0.5 rounded-xl bg-black/[0.06] dark:bg-white/[0.08] text-[11px] font-bold">
                     <button
                       type="button"
                       onClick={() => {
-                        setInspectorOpenMobile(false);
-                        setInspectorCollapsedDesktop(true);
+                        setInspectorMode('slot');
+                        playMacSound('pop', soundEnabled);
                       }}
-                      className="px-2 py-0.5 rounded-lg bg-black/10 dark:bg-white/10 hover:bg-rose-500 hover:text-white text-xs font-bold transition flex items-center gap-1"
-                      title="Fechar ou recolher inspetor"
+                      className={`py-1.5 px-2 rounded-lg transition flex items-center justify-center gap-1 ${
+                        inspectorMode === 'slot'
+                          ? 'bg-white dark:bg-slate-800 text-mac-blue shadow-sm'
+                          : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                      }`}
                     >
-                      <span>✕</span>
-                      <span className="text-[10px]">Fechar</span>
+                      <span>📍</span>
+                      <span>Endereço</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setInspectorMode('tower');
+                        playMacSound('pop', soundEnabled);
+                      }}
+                      className={`py-1.5 px-2 rounded-lg transition flex items-center justify-center gap-1 ${
+                        inspectorMode === 'tower'
+                          ? 'bg-mac-blue text-white shadow-sm'
+                          : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                      }`}
+                      title="Alternar rapidamente entre todos os níveis da torre com 1 clique"
+                    >
+                      <span>🏢</span>
+                      <span>Inspeção de Torre</span>
                     </button>
                   </div>
                 </div>
+
+                {/* TOWER INSPECTION QUICK-SWITCH PANEL */}
+                {inspectorMode === 'tower' && (
+                  <TowerInspectionPanel
+                    rua={inspectedSlot.parsed.rua}
+                    pos={inspectedSlot.parsed.pos}
+                    activeNivel={inspectedSlot.parsed.nivel}
+                    maxLv={inspectedSlot.maxLv}
+                    addressMap={addressMap}
+                    transbordoRegistry={transbordoRegistry}
+                    conflictSlots={conflictAnalysis.allConflictSlots}
+                    invaderSlots={conflictAnalysis.invaderSlots}
+                    lowStockSlots={conflictAnalysis.lowStockSlots}
+                    isPulmao={isPulmaoStreet(inspectedSlot.parsed.rua)}
+                    onSelectLevel={handleSelectTowerLevel}
+                    onNavigateTower={handleNavigateInspectedTower}
+                    onQuickAllocateLevel={wms => openAllocateOrEditSkuModal(null, wms)}
+                    onQuickTogglePulmao={
+                      isPulmaoStreet(inspectedSlot.parsed.rua)
+                        ? (lv, isOccupied) =>
+                            togglePulmaoPosition(
+                              inspectedSlot.parsed.rua,
+                              inspectedSlot.parsed.pos,
+                              lv,
+                              isOccupied ? null : pulmaoTempNote,
+                              pulmaoTempQty
+                            )
+                        : undefined
+                    }
+                  />
+                )}
 
                 {/* CASE 1: TRANSBORDO SLOT */}
                 {inspectedSlot.trbEntry ? (
